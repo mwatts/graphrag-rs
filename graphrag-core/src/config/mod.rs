@@ -3,44 +3,47 @@ use std::fs;
 
 /// Enhanced configuration options for GraphRAG
 pub mod enhancements;
+/// JSON5 configuration support
+#[cfg(feature = "json5-support")]
+pub mod json5_loader;
 /// Configuration file loading utilities
 pub mod loader;
+/// JSON Schema validation
+#[cfg(feature = "json5-support")]
+pub mod schema_validator;
 /// SetConfig configuration support (TOML, JSON5, YAML, JSON)
 pub mod setconfig;
 /// Configuration validation utilities
 pub mod validation;
-/// JSON5 configuration support
-#[cfg(feature = "json5-support")]
-pub mod json5_loader;
-/// JSON Schema validation
-#[cfg(feature = "json5-support")]
-pub mod schema_validator;
 
 pub use setconfig::{
-    SetConfig,
-    // Pipeline approach configuration
-    ModeConfig,
-    // Semantic/Neural pipeline
-    SemanticPipelineConfig,
-    SemanticEmbeddingsConfig,
-    SemanticEntityConfig,
-    SemanticRetrievalConfig,
-    SemanticGraphConfig,
-    // Algorithmic/Classic NLP pipeline
-    AlgorithmicPipelineConfig,
     AlgorithmicEmbeddingsConfig,
     AlgorithmicEntityConfig,
-    AlgorithmicRetrievalConfig,
     AlgorithmicGraphConfig,
-    // Hybrid pipeline
-    HybridPipelineConfig,
-    HybridWeightsConfig,
+    // Algorithmic/Classic NLP pipeline
+    AlgorithmicPipelineConfig,
+    AlgorithmicRetrievalConfig,
     HybridEmbeddingsConfig,
     HybridEntityConfig,
-    HybridRetrievalConfig,
     HybridGraphConfig,
+    // Hybrid pipeline
+    HybridPipelineConfig,
+    HybridRetrievalConfig,
+    HybridWeightsConfig,
+    // Pipeline approach configuration
+    ModeConfig,
+    SemanticEmbeddingsConfig,
+    SemanticEntityConfig,
+    SemanticGraphConfig,
+    // Semantic/Neural pipeline
+    SemanticPipelineConfig,
+    SemanticRetrievalConfig,
+    SetConfig,
+    // Storage configurations
+    StorageConfig,
+    SurrealDbSetConfig,
 };
-pub use validation::{Validatable, ValidationResult, validate_config_file};
+pub use validation::{validate_config_file, Validatable, ValidationResult};
 
 /// Configuration for the GraphRAG system
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -256,16 +259,16 @@ pub struct LazyRelevanceScoringConfig {
 pub struct E2GraphRAGConfig {
     /// Whether the E2E GraphRAG pipeline is enabled
     pub enabled: bool,
-    
+
     /// Configuration for Named Entity Recognition (NER) extraction
     pub ner_extraction: NERExtractionConfig,
-    
+
     /// Configuration for keyword extraction from text
     pub keyword_extraction: KeywordExtractionConfig,
-    
+
     /// Configuration for graph construction parameters
     pub graph_construction: E2GraphConstructionConfig,
-    
+
     /// Configuration for indexing strategies
     pub indexing: E2IndexingConfig,
 }
@@ -276,31 +279,31 @@ pub struct E2GraphRAGConfig {
 pub struct NERExtractionConfig {
     /// List of entity types to recognize (e.g., ["PERSON", "ORG", "LOCATION"])
     pub entity_types: Vec<String>,
-    
+
     /// Whether to recognize capitalized words as potential named entities
     pub use_capitalized_patterns: bool,
-    
+
     /// Whether to recognize title-cased phrases as potential named entities
     pub use_title_case_patterns: bool,
-    
+
     /// Whether to recognize quoted phrases as potential named entities
     pub use_quoted_patterns: bool,
-    
+
     /// Whether to recognize common abbreviations as entities
     pub use_abbreviations: bool,
-    
+
     /// Whether to use contextual disambiguation to resolve entity ambiguity
     pub use_contextual_disambiguation: bool,
-    
+
     /// Minimum number of context words to consider for disambiguation
     pub min_context_words: usize,
-    
+
     /// Minimum confidence score (0.0-1.0) required for an entity to be included
     pub min_confidence: f32,
-    
+
     /// Whether to apply positional boost to entities based on their position in the text
     pub use_positional_boost: bool,
-    
+
     /// Whether to apply frequency boost to entities based on their frequency in the text
     pub use_frequency_boost: bool,
 }
@@ -308,7 +311,11 @@ pub struct NERExtractionConfig {
 impl Default for NERExtractionConfig {
     fn default() -> Self {
         Self {
-            entity_types: vec!["PERSON".to_string(), "ORG".to_string(), "LOCATION".to_string()],
+            entity_types: vec![
+                "PERSON".to_string(),
+                "ORG".to_string(),
+                "LOCATION".to_string(),
+            ],
             use_capitalized_patterns: true,
             use_title_case_patterns: true,
             use_quoted_patterns: true,
@@ -328,13 +335,13 @@ impl Default for NERExtractionConfig {
 pub struct KeywordExtractionConfig {
     /// List of algorithms to use for keyword extraction (e.g., ["tfidf", "yake", "textrank"])
     pub algorithms: Vec<String>,
-    
+
     /// Maximum number of keywords to extract per document chunk
     pub max_keywords_per_chunk: usize,
-    
+
     /// Minimum length of a keyword in characters
     pub min_keyword_length: usize,
-    
+
     /// Whether to combine results from multiple algorithms
     pub combine_algorithms: bool,
 }
@@ -356,13 +363,13 @@ impl Default for KeywordExtractionConfig {
 pub struct E2GraphConstructionConfig {
     /// Types of relationships to extract between entities (e.g., ["CO_OCCURS_WITH", "RELATED_TO"])
     pub relationship_types: Vec<String>,
-    
+
     /// Minimum score required to establish a relationship between entities (0.0-1.0)
     pub min_relationship_score: f32,
-    
+
     /// Maximum number of relationships to maintain per entity
     pub max_relationships_per_entity: usize,
-    
+
     /// Whether to use mutual information for relationship scoring
     pub use_mutual_information: bool,
 }
@@ -384,13 +391,13 @@ impl Default for E2GraphConstructionConfig {
 pub struct E2IndexingConfig {
     /// Number of items to process in a single batch during indexing
     pub batch_size: usize,
-    
+
     /// Whether to enable parallel processing during indexing
     pub enable_parallel_processing: bool,
-    
+
     /// Whether to cache concept vectors for faster retrieval
     pub cache_concept_vectors: bool,
-    
+
     /// Whether to use hash embeddings for more efficient storage
     pub use_hash_embeddings: bool,
 }
@@ -649,27 +656,263 @@ impl Default for ZeroCostApproachConfig {
 }
 
 // Default implementations for sub-configs (simplified for now)
-impl Default for LazyGraphRAGConfig { fn default() -> Self { Self { enabled: false, concept_extraction: Default::default(), co_occurrence: Default::default(), indexing: Default::default(), query_expansion: Default::default(), relevance_scoring: Default::default() } } }
-impl Default for ConceptExtractionConfig { fn default() -> Self { Self { min_concept_length: 3, max_concept_words: 5, use_noun_phrases: true, use_capitalization: true, use_title_case: true, use_tf_idf_scoring: true, min_term_frequency: 2, max_concepts_per_chunk: 10, min_concept_score: 0.1, exclude_stopwords: true, custom_stopwords: vec!["the".to_string(), "and".to_string(), "or".to_string()] } } }
-impl Default for CoOccurrenceConfig { fn default() -> Self { Self { window_size: 50, min_co_occurrence: 2, jaccard_threshold: 0.2, max_edges_per_node: 25 } } }
-impl Default for LazyIndexingConfig { fn default() -> Self { Self { use_bidirectional_index: true, enable_hnsw_index: false, cache_size: 10000 } } }
-impl Default for LazyQueryExpansionConfig { fn default() -> Self { Self { enabled: true, max_expansions: 3, expansion_model: "llama3.1:8b".to_string(), expansion_temperature: 0.1, max_tokens_per_expansion: 50 } } }
-impl Default for LazyRelevanceScoringConfig { fn default() -> Self { Self { enabled: true, scoring_model: "llama3.1:8b".to_string(), batch_size: 10, temperature: 0.2, max_tokens_per_score: 30 } } }
-impl Default for E2GraphRAGConfig { fn default() -> Self { Self { enabled: false, ner_extraction: Default::default(), keyword_extraction: Default::default(), graph_construction: Default::default(), indexing: Default::default() } } }
-impl Default for PureAlgorithmicConfig { fn default() -> Self { Self { enabled: true, pattern_extraction: Default::default(), keyword_extraction: Default::default(), relationship_discovery: Default::default(), search_ranking: Default::default() } } }
-impl Default for PatternExtractionConfig { fn default() -> Self { Self { capitalized_patterns: vec![r"[A-Z][a-z]+".to_string()], technical_patterns: vec![r"[a-z]+-[a-z]+".to_string()], context_patterns: vec![r"\b(the|this)\s+(\w+)".to_string()] } } }
-impl Default for PureKeywordExtractionConfig { fn default() -> Self { Self { algorithm: "tf_idf".to_string(), max_keywords: 20, min_word_length: 4, use_positional_boost: true, use_frequency_filter: true, min_term_frequency: 2, max_term_frequency_ratio: 0.8 } } }
-impl Default for RelationshipDiscoveryConfig { fn default() -> Self { Self { window_size: 30, min_co_occurrence: 2, use_mutual_information: true, relationship_types: vec!["co_occurs_with".to_string()], scoring_method: "jaccard_similarity".to_string(), min_similarity_score: 0.1 } } }
-impl Default for SearchRankingConfig { fn default() -> Self { Self { vector_search: VectorSearchConfig { enabled: false }, keyword_search: KeywordSearchConfig { enabled: true, algorithm: "bm25".to_string(), k1: 1.2, b: 0.75 }, graph_traversal: GraphTraversalConfig { enabled: true, algorithm: "pagerank".to_string(), damping_factor: 0.85, max_iterations: 20, personalized: true }, hybrid_fusion: HybridFusionConfig { enabled: true, weights: FusionWeights { keywords: 0.4, graph: 0.4, bm25: 0.2 } } } } }
-impl Default for HybridStrategyConfig { fn default() -> Self { Self { lazy_algorithmic: LazyAlgorithmicConfig { indexing_approach: "e2_graphrag".to_string(), query_approach: "lazy_graphrag".to_string(), cost_optimization: "indexing".to_string() }, progressive: ProgressiveConfig { level_0: "pure_algorithmic".to_string(), level_1: "pure_algorithmic".to_string(), level_2: "e2_graphrag".to_string(), level_3: "lazy_graphrag".to_string(), level_4_plus: "lazy_graphrag".to_string() }, budget_aware: BudgetAwareConfig { daily_budget_usd: 1.0, queries_per_day: 1000, max_llm_cost_per_query: 0.002, strategy: "lazy_graphrag".to_string(), fallback_to_algorithmic: true } } } }
-impl Default for VectorSearchConfig { fn default() -> Self { Self { enabled: false } } }
-impl Default for KeywordSearchConfig { fn default() -> Self { Self { enabled: true, algorithm: "bm25".to_string(), k1: 1.2, b: 0.75 } } }
-impl Default for GraphTraversalConfig { fn default() -> Self { Self { enabled: true, algorithm: "pagerank".to_string(), damping_factor: 0.85, max_iterations: 20, personalized: true } } }
-impl Default for HybridFusionConfig { fn default() -> Self { Self { enabled: true, weights: FusionWeights { keywords: 0.4, graph: 0.4, bm25: 0.2 } } } }
-impl Default for FusionWeights { fn default() -> Self { Self { keywords: 0.4, graph: 0.4, bm25: 0.2 } } }
-impl Default for LazyAlgorithmicConfig { fn default() -> Self { Self { indexing_approach: "e2_graphrag".to_string(), query_approach: "lazy_graphrag".to_string(), cost_optimization: "indexing".to_string() } } }
-impl Default for ProgressiveConfig { fn default() -> Self { Self { level_0: "pure_algorithmic".to_string(), level_1: "pure_algorithmic".to_string(), level_2: "e2_graphrag".to_string(), level_3: "lazy_graphrag".to_string(), level_4_plus: "lazy_graphrag".to_string() } } }
-impl Default for BudgetAwareConfig { fn default() -> Self { Self { daily_budget_usd: 1.0, queries_per_day: 1000, max_llm_cost_per_query: 0.002, strategy: "lazy_graphrag".to_string(), fallback_to_algorithmic: true } } }
+impl Default for LazyGraphRAGConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            concept_extraction: Default::default(),
+            co_occurrence: Default::default(),
+            indexing: Default::default(),
+            query_expansion: Default::default(),
+            relevance_scoring: Default::default(),
+        }
+    }
+}
+impl Default for ConceptExtractionConfig {
+    fn default() -> Self {
+        Self {
+            min_concept_length: 3,
+            max_concept_words: 5,
+            use_noun_phrases: true,
+            use_capitalization: true,
+            use_title_case: true,
+            use_tf_idf_scoring: true,
+            min_term_frequency: 2,
+            max_concepts_per_chunk: 10,
+            min_concept_score: 0.1,
+            exclude_stopwords: true,
+            custom_stopwords: vec!["the".to_string(), "and".to_string(), "or".to_string()],
+        }
+    }
+}
+impl Default for CoOccurrenceConfig {
+    fn default() -> Self {
+        Self {
+            window_size: 50,
+            min_co_occurrence: 2,
+            jaccard_threshold: 0.2,
+            max_edges_per_node: 25,
+        }
+    }
+}
+impl Default for LazyIndexingConfig {
+    fn default() -> Self {
+        Self {
+            use_bidirectional_index: true,
+            enable_hnsw_index: false,
+            cache_size: 10000,
+        }
+    }
+}
+impl Default for LazyQueryExpansionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_expansions: 3,
+            expansion_model: "llama3.1:8b".to_string(),
+            expansion_temperature: 0.1,
+            max_tokens_per_expansion: 50,
+        }
+    }
+}
+impl Default for LazyRelevanceScoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scoring_model: "llama3.1:8b".to_string(),
+            batch_size: 10,
+            temperature: 0.2,
+            max_tokens_per_score: 30,
+        }
+    }
+}
+impl Default for E2GraphRAGConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ner_extraction: Default::default(),
+            keyword_extraction: Default::default(),
+            graph_construction: Default::default(),
+            indexing: Default::default(),
+        }
+    }
+}
+impl Default for PureAlgorithmicConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pattern_extraction: Default::default(),
+            keyword_extraction: Default::default(),
+            relationship_discovery: Default::default(),
+            search_ranking: Default::default(),
+        }
+    }
+}
+impl Default for PatternExtractionConfig {
+    fn default() -> Self {
+        Self {
+            capitalized_patterns: vec![r"[A-Z][a-z]+".to_string()],
+            technical_patterns: vec![r"[a-z]+-[a-z]+".to_string()],
+            context_patterns: vec![r"\b(the|this)\s+(\w+)".to_string()],
+        }
+    }
+}
+impl Default for PureKeywordExtractionConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: "tf_idf".to_string(),
+            max_keywords: 20,
+            min_word_length: 4,
+            use_positional_boost: true,
+            use_frequency_filter: true,
+            min_term_frequency: 2,
+            max_term_frequency_ratio: 0.8,
+        }
+    }
+}
+impl Default for RelationshipDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            window_size: 30,
+            min_co_occurrence: 2,
+            use_mutual_information: true,
+            relationship_types: vec!["co_occurs_with".to_string()],
+            scoring_method: "jaccard_similarity".to_string(),
+            min_similarity_score: 0.1,
+        }
+    }
+}
+impl Default for SearchRankingConfig {
+    fn default() -> Self {
+        Self {
+            vector_search: VectorSearchConfig { enabled: false },
+            keyword_search: KeywordSearchConfig {
+                enabled: true,
+                algorithm: "bm25".to_string(),
+                k1: 1.2,
+                b: 0.75,
+            },
+            graph_traversal: GraphTraversalConfig {
+                enabled: true,
+                algorithm: "pagerank".to_string(),
+                damping_factor: 0.85,
+                max_iterations: 20,
+                personalized: true,
+            },
+            hybrid_fusion: HybridFusionConfig {
+                enabled: true,
+                weights: FusionWeights {
+                    keywords: 0.4,
+                    graph: 0.4,
+                    bm25: 0.2,
+                },
+            },
+        }
+    }
+}
+impl Default for HybridStrategyConfig {
+    fn default() -> Self {
+        Self {
+            lazy_algorithmic: LazyAlgorithmicConfig {
+                indexing_approach: "e2_graphrag".to_string(),
+                query_approach: "lazy_graphrag".to_string(),
+                cost_optimization: "indexing".to_string(),
+            },
+            progressive: ProgressiveConfig {
+                level_0: "pure_algorithmic".to_string(),
+                level_1: "pure_algorithmic".to_string(),
+                level_2: "e2_graphrag".to_string(),
+                level_3: "lazy_graphrag".to_string(),
+                level_4_plus: "lazy_graphrag".to_string(),
+            },
+            budget_aware: BudgetAwareConfig {
+                daily_budget_usd: 1.0,
+                queries_per_day: 1000,
+                max_llm_cost_per_query: 0.002,
+                strategy: "lazy_graphrag".to_string(),
+                fallback_to_algorithmic: true,
+            },
+        }
+    }
+}
+impl Default for VectorSearchConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+impl Default for KeywordSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            algorithm: "bm25".to_string(),
+            k1: 1.2,
+            b: 0.75,
+        }
+    }
+}
+impl Default for GraphTraversalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            algorithm: "pagerank".to_string(),
+            damping_factor: 0.85,
+            max_iterations: 20,
+            personalized: true,
+        }
+    }
+}
+impl Default for HybridFusionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            weights: FusionWeights {
+                keywords: 0.4,
+                graph: 0.4,
+                bm25: 0.2,
+            },
+        }
+    }
+}
+impl Default for FusionWeights {
+    fn default() -> Self {
+        Self {
+            keywords: 0.4,
+            graph: 0.4,
+            bm25: 0.2,
+        }
+    }
+}
+impl Default for LazyAlgorithmicConfig {
+    fn default() -> Self {
+        Self {
+            indexing_approach: "e2_graphrag".to_string(),
+            query_approach: "lazy_graphrag".to_string(),
+            cost_optimization: "indexing".to_string(),
+        }
+    }
+}
+impl Default for ProgressiveConfig {
+    fn default() -> Self {
+        Self {
+            level_0: "pure_algorithmic".to_string(),
+            level_1: "pure_algorithmic".to_string(),
+            level_2: "e2_graphrag".to_string(),
+            level_3: "lazy_graphrag".to_string(),
+            level_4_plus: "lazy_graphrag".to_string(),
+        }
+    }
+}
+impl Default for BudgetAwareConfig {
+    fn default() -> Self {
+        Self {
+            daily_budget_usd: 1.0,
+            queries_per_day: 1000,
+            max_llm_cost_per_query: 0.002,
+            strategy: "lazy_graphrag".to_string(),
+            fallback_to_algorithmic: true,
+        }
+    }
+}
 
 /// Configuration for embedding generation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -903,10 +1146,10 @@ fn default_min_relationship_strength() -> f32 {
     0.3
 }
 fn default_auto_save_interval() -> u64 {
-    300  // 5 minutes
+    300 // 5 minutes
 }
 fn default_max_versions() -> usize {
-    5  // Keep 5 versions by default
+    5 // Keep 5 versions by default
 }
 
 impl Default for Config {
@@ -1002,12 +1245,9 @@ impl Config {
             chunk_overlap: parsed["chunk_overlap"]
                 .as_usize()
                 .unwrap_or(default_chunk_overlap()),
-            max_entities_per_chunk: parsed["max_entities_per_chunk"]
-                .as_usize(),
-            top_k_results: parsed["top_k_results"]
-                .as_usize(),
-            similarity_threshold: parsed["similarity_threshold"]
-                .as_f32(),
+            max_entities_per_chunk: parsed["max_entities_per_chunk"].as_usize(),
+            top_k_results: parsed["top_k_results"].as_usize(),
+            similarity_threshold: parsed["similarity_threshold"].as_f32(),
             approach: parsed["approach"]
                 .as_str()
                 .unwrap_or(&default_approach())
@@ -1049,7 +1289,8 @@ impl Config {
                 extract_relationships: parsed["graph"]["extract_relationships"]
                     .as_bool()
                     .unwrap_or(default_true()),
-                relationship_confidence_threshold: parsed["graph"]["relationship_confidence_threshold"]
+                relationship_confidence_threshold: parsed["graph"]
+                    ["relationship_confidence_threshold"]
                     .as_f32()
                     .unwrap_or(default_relationship_confidence()),
                 traversal: TraversalConfigParams {
@@ -1062,7 +1303,8 @@ impl Config {
                     use_edge_weights: parsed["graph"]["traversal"]["use_edge_weights"]
                         .as_bool()
                         .unwrap_or(default_true()),
-                    min_relationship_strength: parsed["graph"]["traversal"]["min_relationship_strength"]
+                    min_relationship_strength: parsed["graph"]["traversal"]
+                        ["min_relationship_strength"]
                         .as_f32()
                         .unwrap_or(default_min_relationship_strength()),
                 },
@@ -1288,8 +1530,7 @@ impl Config {
                     use_lcc: parsed["enhancements"]["leiden"]["use_lcc"]
                         .as_bool()
                         .unwrap_or(true),
-                    seed: parsed["enhancements"]["leiden"]["seed"]
-                        .as_u64(),
+                    seed: parsed["enhancements"]["leiden"]["seed"].as_u64(),
                     resolution: parsed["enhancements"]["leiden"]["resolution"]
                         .as_f32()
                         .unwrap_or(1.0),
@@ -1308,23 +1549,28 @@ impl Config {
                     max_summary_length: parsed["enhancements"]["leiden"]["max_summary_length"]
                         .as_usize()
                         .unwrap_or(5),
-                    use_extractive_summary: parsed["enhancements"]["leiden"]["use_extractive_summary"]
+                    use_extractive_summary: parsed["enhancements"]["leiden"]
+                        ["use_extractive_summary"]
                         .as_bool()
                         .unwrap_or(true),
                     adaptive_routing: enhancements::AdaptiveRoutingConfig {
                         enabled: parsed["enhancements"]["leiden"]["adaptive_routing"]["enabled"]
                             .as_bool()
                             .unwrap_or(true),
-                        default_level: parsed["enhancements"]["leiden"]["adaptive_routing"]["default_level"]
+                        default_level: parsed["enhancements"]["leiden"]["adaptive_routing"]
+                            ["default_level"]
                             .as_usize()
                             .unwrap_or(1),
-                        keyword_weight: parsed["enhancements"]["leiden"]["adaptive_routing"]["keyword_weight"]
+                        keyword_weight: parsed["enhancements"]["leiden"]["adaptive_routing"]
+                            ["keyword_weight"]
                             .as_f32()
                             .unwrap_or(0.5),
-                        length_weight: parsed["enhancements"]["leiden"]["adaptive_routing"]["length_weight"]
+                        length_weight: parsed["enhancements"]["leiden"]["adaptive_routing"]
+                            ["length_weight"]
                             .as_f32()
                             .unwrap_or(0.3),
-                        entity_weight: parsed["enhancements"]["leiden"]["adaptive_routing"]["entity_weight"]
+                        entity_weight: parsed["enhancements"]["leiden"]["adaptive_routing"]
+                            ["entity_weight"]
                             .as_f32()
                             .unwrap_or(0.2),
                     },
@@ -1398,7 +1644,8 @@ impl Config {
                                 .unwrap_or(180),
                             strategy: match parsed["summarization"]["llm_config"]["strategy"]
                                 .as_str()
-                                .unwrap_or("progressive") {
+                                .unwrap_or("progressive")
+                            {
                                 "uniform" => crate::summarization::LLMStrategy::Uniform,
                                 "adaptive" => crate::summarization::LLMStrategy::Adaptive,
                                 "progressive" => crate::summarization::LLMStrategy::Progressive,
@@ -1465,13 +1712,16 @@ impl Config {
         graph["max_connections"] = json::JsonValue::from(self.graph.max_connections);
         graph["similarity_threshold"] = json::JsonValue::from(self.graph.similarity_threshold);
         graph["extract_relationships"] = json::JsonValue::from(self.graph.extract_relationships);
-        graph["relationship_confidence_threshold"] = json::JsonValue::from(self.graph.relationship_confidence_threshold);
+        graph["relationship_confidence_threshold"] =
+            json::JsonValue::from(self.graph.relationship_confidence_threshold);
 
         let mut traversal = json::JsonValue::new_object();
         traversal["max_depth"] = json::JsonValue::from(self.graph.traversal.max_depth);
         traversal["max_paths"] = json::JsonValue::from(self.graph.traversal.max_paths);
-        traversal["use_edge_weights"] = json::JsonValue::from(self.graph.traversal.use_edge_weights);
-        traversal["min_relationship_strength"] = json::JsonValue::from(self.graph.traversal.min_relationship_strength);
+        traversal["use_edge_weights"] =
+            json::JsonValue::from(self.graph.traversal.use_edge_weights);
+        traversal["min_relationship_strength"] =
+            json::JsonValue::from(self.graph.traversal.min_relationship_strength);
         graph["traversal"] = traversal;
 
         config_json["graph"] = graph;
@@ -1617,14 +1867,18 @@ impl Config {
         // Summarization
         let mut summarization = json::JsonValue::new_object();
         summarization["merge_size"] = json::JsonValue::from(self.summarization.merge_size);
-        summarization["max_summary_length"] = json::JsonValue::from(self.summarization.max_summary_length);
+        summarization["max_summary_length"] =
+            json::JsonValue::from(self.summarization.max_summary_length);
         summarization["min_node_size"] = json::JsonValue::from(self.summarization.min_node_size);
-        summarization["overlap_sentences"] = json::JsonValue::from(self.summarization.overlap_sentences);
+        summarization["overlap_sentences"] =
+            json::JsonValue::from(self.summarization.overlap_sentences);
 
         let mut llm_config = json::JsonValue::new_object();
         llm_config["enabled"] = json::JsonValue::from(self.summarization.llm_config.enabled);
-        llm_config["model_name"] = json::JsonValue::from(self.summarization.llm_config.model_name.as_str());
-        llm_config["temperature"] = json::JsonValue::from(self.summarization.llm_config.temperature);
+        llm_config["model_name"] =
+            json::JsonValue::from(self.summarization.llm_config.model_name.as_str());
+        llm_config["temperature"] =
+            json::JsonValue::from(self.summarization.llm_config.temperature);
         llm_config["max_tokens"] = json::JsonValue::from(self.summarization.llm_config.max_tokens);
         let strategy_str = match self.summarization.llm_config.strategy {
             crate::summarization::LLMStrategy::Uniform => "uniform",

@@ -291,7 +291,7 @@ pub struct CommunityDetectionConfig {
 /// Storage backend configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Database type
+    /// Database type: "sqlite", "postgresql", "neo4j", or "surrealdb"
     #[serde(default = "default_database_type")]
     pub database_type: String,
 
@@ -308,6 +308,9 @@ pub struct StorageConfig {
 
     /// Neo4j configuration
     pub neo4j: Option<Neo4jConfig>,
+
+    /// SurrealDB configuration (multi-model: document, vector, graph)
+    pub surrealdb: Option<SurrealDbSetConfig>,
 }
 
 /// PostgreSQL database configuration
@@ -340,6 +343,98 @@ pub struct Neo4jConfig {
     /// Enable encrypted connections
     #[serde(default)]
     pub encrypted: bool,
+}
+
+/// SurrealDB multi-model database configuration
+///
+/// SurrealDB provides document storage, vector search, and graph capabilities
+/// in a single database, making it ideal for GraphRAG workloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurrealDbSetConfig {
+    /// Connection endpoint
+    /// Examples: "mem://" (memory), "rocksdb://./data" (persistent), "ws://localhost:8000" (remote)
+    #[serde(default = "default_surrealdb_endpoint")]
+    pub endpoint: String,
+
+    /// Namespace for data isolation
+    #[serde(default = "default_surrealdb_namespace")]
+    pub namespace: String,
+
+    /// Database name within the namespace
+    #[serde(default = "default_surrealdb_database")]
+    pub database: String,
+
+    /// Username for authentication (optional for local/memory)
+    pub username: Option<String>,
+
+    /// Password for authentication (optional for local/memory)
+    pub password: Option<String>,
+
+    /// Automatically initialize database schema
+    #[serde(default = "default_true")]
+    pub auto_init_schema: bool,
+
+    /// Vector embedding dimension (for vector store)
+    #[serde(default = "default_vector_dimension")]
+    pub vector_dimension: usize,
+
+    /// Distance metric for vector similarity search
+    #[serde(default = "default_distance_metric")]
+    pub distance_metric: String,
+
+    /// Maximum graph traversal depth
+    #[serde(default = "default_max_traversal_depth")]
+    pub max_traversal_depth: usize,
+
+    /// Enable vector store functionality
+    #[serde(default = "default_true")]
+    pub enable_vector_store: bool,
+
+    /// Enable graph store functionality
+    #[serde(default = "default_true")]
+    pub enable_graph_store: bool,
+}
+
+fn default_surrealdb_endpoint() -> String {
+    "mem://".to_string()
+}
+
+fn default_surrealdb_namespace() -> String {
+    "graphrag".to_string()
+}
+
+fn default_surrealdb_database() -> String {
+    "default".to_string()
+}
+
+fn default_vector_dimension() -> usize {
+    384
+}
+
+fn default_distance_metric() -> String {
+    "cosine".to_string()
+}
+
+fn default_max_traversal_depth() -> usize {
+    10
+}
+
+impl Default for SurrealDbSetConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_surrealdb_endpoint(),
+            namespace: default_surrealdb_namespace(),
+            database: default_surrealdb_database(),
+            username: None,
+            password: None,
+            auto_init_schema: true,
+            vector_dimension: default_vector_dimension(),
+            distance_metric: default_distance_metric(),
+            max_traversal_depth: default_max_traversal_depth(),
+            enable_vector_store: true,
+            enable_graph_store: true,
+        }
+    }
 }
 
 /// Model configuration for LLM and embeddings
@@ -1316,24 +1411,24 @@ fn default_hybrid_fallback_strategy() -> String {
     "semantic_first".to_string()
 }
 fn default_auto_save_interval() -> u64 {
-    300  // 5 minutes
+    300 // 5 minutes
 }
 fn default_max_auto_save_versions() -> usize {
-    5  // Keep 5 versions by default
+    5 // Keep 5 versions by default
 }
 
 // LazyGraphRAG default functions
 fn default_min_concept_length() -> usize {
-    3  // Minimum 3 characters for concepts
+    3 // Minimum 3 characters for concepts
 }
 fn default_max_concept_words() -> usize {
-    5  // Maximum 5 words per concept
+    5 // Maximum 5 words per concept
 }
 fn default_co_occurrence_threshold() -> usize {
-    1  // Minimum 1 shared chunk for relationship
+    1 // Minimum 1 shared chunk for relationship
 }
 fn default_max_refinement_iterations() -> usize {
-    3  // Up to 3 query refinement iterations
+    3 // Up to 3 query refinement iterations
 }
 
 // E2GraphRAG default functions
@@ -1346,10 +1441,10 @@ fn default_e2_entity_types() -> Vec<String> {
     ]
 }
 fn default_e2_min_confidence() -> f32 {
-    0.6  // 60% minimum confidence for pattern-based extraction
+    0.6 // 60% minimum confidence for pattern-based extraction
 }
 fn default_min_entity_frequency() -> usize {
-    1  // Entities must appear at least once
+    1 // Entities must appear at least once
 }
 
 impl Default for GeneralConfig {
@@ -1433,6 +1528,7 @@ impl Default for StorageConfig {
             enable_wal: default_true(),
             postgresql: None,
             neo4j: None,
+            surrealdb: None,
         }
     }
 }
@@ -1680,10 +1776,7 @@ impl SetConfig {
         let content = fs::read_to_string(path_ref)?;
 
         // Detect format by file extension
-        let extension = path_ref
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let extension = path_ref.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let config: SetConfig = match extension {
             #[cfg(feature = "json5-support")]
@@ -1691,18 +1784,17 @@ impl SetConfig {
                 json5::from_str(&content).map_err(|e| crate::core::GraphRAGError::Config {
                     message: format!("JSON5 parse error: {e}"),
                 })?
-            }
+            },
             #[cfg(not(feature = "json5-support"))]
             "json5" | "json" => {
                 return Err(crate::core::GraphRAGError::Config {
-                    message: "JSON5 support not enabled. Rebuild with --features json5-support".to_string(),
+                    message: "JSON5 support not enabled. Rebuild with --features json5-support"
+                        .to_string(),
                 });
-            }
-            _ => {
-                toml::from_str(&content).map_err(|e| crate::core::GraphRAGError::Config {
-                    message: format!("TOML parse error: {e}"),
-                })?
-            }
+            },
+            _ => toml::from_str(&content).map_err(|e| crate::core::GraphRAGError::Config {
+                message: format!("TOML parse error: {e}"),
+            })?,
         };
 
         Ok(config)
@@ -1739,9 +1831,7 @@ impl SetConfig {
         config.text.chunk_overlap = self.pipeline.text_extraction.chunk_overlap;
 
         // Map entity extraction based on approach
-        config.entities.min_confidence = self
-            .entity_extraction
-            .min_confidence;
+        config.entities.min_confidence = self.entity_extraction.min_confidence;
 
         // Map entity types from pipeline.entity_extraction
         if let Some(ref types) = self.pipeline.entity_extraction.entity_types {
@@ -1756,8 +1846,10 @@ impl SetConfig {
             "semantic" => {
                 if let Some(ref semantic) = self.semantic {
                     config.entities.use_gleaning = semantic.entity_extraction.use_gleaning;
-                    config.entities.max_gleaning_rounds = semantic.entity_extraction.max_gleaning_rounds;
-                    config.entities.min_confidence = semantic.entity_extraction.confidence_threshold;
+                    config.entities.max_gleaning_rounds =
+                        semantic.entity_extraction.max_gleaning_rounds;
+                    config.entities.min_confidence =
+                        semantic.entity_extraction.confidence_threshold;
                 } else {
                     // Fallback for semantic approach: ALWAYS enable gleaning when mode.approach = "semantic"
                     // This ensures JSON5 configs with mode.approach="semantic" use LLM-based extraction
@@ -1770,14 +1862,15 @@ impl SetConfig {
                     // Use top-level min_confidence if available
                     config.entities.min_confidence = self.entity_extraction.min_confidence;
                 }
-            }
+            },
             "algorithmic" => {
                 // Algorithmic uses pattern-based extraction, no gleaning
                 config.entities.use_gleaning = false;
                 if let Some(ref algorithmic) = self.algorithmic {
-                    config.entities.min_confidence = algorithmic.entity_extraction.confidence_threshold;
+                    config.entities.min_confidence =
+                        algorithmic.entity_extraction.confidence_threshold;
                 }
-            }
+            },
             "hybrid" => {
                 // Hybrid can use both, enable gleaning for LLM component
                 config.entities.use_gleaning = true;
@@ -1785,12 +1878,12 @@ impl SetConfig {
                     // Use hybrid configuration if available
                     config.entities.max_gleaning_rounds = 2; // Reduced for hybrid efficiency
                 }
-            }
+            },
             _ => {
                 // Unknown approach, use top-level config as fallback
                 config.entities.use_gleaning = self.entity_extraction.use_gleaning;
                 config.entities.max_gleaning_rounds = self.entity_extraction.max_gleaning_rounds;
-            }
+            },
         }
 
         // Map graph building

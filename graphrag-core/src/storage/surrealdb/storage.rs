@@ -125,6 +125,46 @@ impl SurrealDbStorage {
         Ok(())
     }
 
+    /// Create a storage instance from an existing database connection
+    ///
+    /// This is useful when you want to share a single database connection
+    /// across multiple storage instances (e.g., with vector store and graph store).
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - Arc-wrapped SurrealDB client
+    /// * `config` - Configuration (used for reference, connection already established)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let config = SurrealDbConfig::memory();
+    /// let storage = SurrealDbStorage::new(config.clone()).await?;
+    /// let shared_client = storage.client_arc();
+    ///
+    /// // Create another storage instance sharing the same connection
+    /// let storage2 = SurrealDbStorage::from_client(shared_client, config);
+    /// ```
+    pub fn from_client(db: Arc<Surreal<Any>>, config: SurrealDbConfig) -> Self {
+        Self { db, config }
+    }
+
+    /// Create a storage instance from an existing connection with schema init
+    ///
+    /// Like `from_client`, but also initializes the schema if configured.
+    pub async fn from_client_with_init(
+        db: Arc<Surreal<Any>>,
+        config: SurrealDbConfig,
+    ) -> Result<Self> {
+        let storage = Self::from_client(db, config);
+
+        if storage.config.auto_init_schema {
+            storage.init_schema().await?;
+        }
+
+        Ok(storage)
+    }
+
     /// Get reference to the underlying SurrealDB client
     ///
     /// This allows advanced operations not covered by the AsyncStorage trait.
@@ -135,6 +175,11 @@ impl SurrealDbStorage {
     /// Get a clone of the Arc-wrapped client for sharing across tasks
     pub fn client_arc(&self) -> Arc<Surreal<Any>> {
         Arc::clone(&self.db)
+    }
+
+    /// Get the configuration
+    pub fn config(&self) -> &SurrealDbConfig {
+        &self.config
     }
 }
 

@@ -71,10 +71,12 @@ mod config;
 mod error;
 mod graph;
 mod storage;
+mod unified;
 mod vector;
 
 pub use config::{SurrealDbConfig, SurrealDbCredentials};
 pub use error::SurrealDbStorageError;
 pub use graph::{SurrealDbGraphConfig, SurrealDbGraphStore};
 pub use storage::SurrealDbStorage;
+pub use unified::{SurrealDbUnifiedConfig, SurrealDbUnifiedStorage, UnifiedStorageStats};
 pub use vector::{DistanceMetric, SurrealDbVectorConfig, SurrealDbVectorStore};

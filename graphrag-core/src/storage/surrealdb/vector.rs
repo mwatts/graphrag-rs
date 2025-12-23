@@ -254,6 +254,9 @@ impl SurrealDbVectorStore {
     }
 
     /// Create a vector store from an existing database connection
+    ///
+    /// This is useful when you want to share a single database connection
+    /// across multiple storage instances.
     pub fn from_client(
         db: Arc<Surreal<Any>>,
         db_config: SurrealDbConfig,
@@ -266,6 +269,23 @@ impl SurrealDbVectorStore {
             config: vector_config,
             db_config,
         })
+    }
+
+    /// Create a vector store from an existing connection with schema init
+    ///
+    /// Like `from_client`, but also initializes the schema if configured.
+    pub async fn from_client_with_init(
+        db: Arc<Surreal<Any>>,
+        db_config: SurrealDbConfig,
+        vector_config: SurrealDbVectorConfig,
+    ) -> Result<Self> {
+        let store = Self::from_client(db, db_config.clone(), vector_config)?;
+
+        if db_config.auto_init_schema {
+            store.init_schema().await?;
+        }
+
+        Ok(store)
     }
 
     /// Get the underlying database client

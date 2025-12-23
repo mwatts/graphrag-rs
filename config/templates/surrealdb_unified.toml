@@ -1,0 +1,277 @@
+# =============================================================================
+# SURREALDB UNIFIED STORAGE CONFIGURATION
+# Multi-model database backend for GraphRAG (document, vector, graph)
+# =============================================================================
+#
+# This template demonstrates using SurrealDB as a unified storage backend:
+# - Document storage: Entities, documents, chunks
+# - Vector storage: Embeddings with similarity search
+# - Graph storage: Entity relationships with traversal
+#
+# Benefits:
+# - Single database for all storage needs
+# - Native graph support with RELATE statements
+# - Built-in vector similarity functions
+# - Multiple backends (memory, RocksDB, remote)
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# MODE: Pipeline Approach Selection
+# -----------------------------------------------------------------------------
+[mode]
+approach = "hybrid"  # Works with any pipeline approach
+
+# -----------------------------------------------------------------------------
+# GENERAL: Basic Configuration
+# -----------------------------------------------------------------------------
+[general]
+input_document_path = "data/input.txt"
+output_dir = "./output/surrealdb"
+log_level = "info"
+max_threads = 4
+enable_profiling = true
+
+# -----------------------------------------------------------------------------
+# STORAGE: SurrealDB Configuration
+# -----------------------------------------------------------------------------
+[storage]
+# Use SurrealDB as the primary database
+database_type = "surrealdb"
+
+# SQLite fallback (if SurrealDB not available)
+database_path = "./graphrag.db"
+enable_wal = true
+
+# --- SURREALDB: Multi-Model Database Configuration ---
+[storage.surrealdb]
+
+# Connection endpoint
+# Options:
+# - "mem://"                    - In-memory (development/testing)
+# - "rocksdb://./data/graphrag" - Persistent local storage
+# - "ws://localhost:8000"       - Remote WebSocket connection
+# - "wss://cloud.surrealdb.com" - Cloud/TLS connection
+endpoint = "rocksdb://./data/graphrag"
+
+# Namespace for data isolation (multi-tenant support)
+namespace = "graphrag"
+
+# Database name within namespace
+database = "default"
+
+# Authentication (optional for local/memory modes)
+# username = "admin"
+# password = "secret"
+
+# Automatically create tables and indexes on startup
+auto_init_schema = true
+
+# --- VECTOR STORE CONFIGURATION ---
+# Dimension must match your embedding model output
+# Common dimensions:
+# - 384: all-MiniLM-L6-v2
+# - 768: all-mpnet-base-v2, nomic-embed-text
+# - 1024: bge-large-en-v1.5
+# - 1536: text-embedding-3-small (OpenAI)
+# - 3072: text-embedding-3-large (OpenAI)
+vector_dimension = 384
+
+# Distance metric for similarity search
+# Options: "cosine", "euclidean", "manhattan"
+distance_metric = "cosine"
+
+# Enable vector store functionality
+enable_vector_store = true
+
+# --- GRAPH STORE CONFIGURATION ---
+# Maximum depth for graph traversal queries
+max_traversal_depth = 10
+
+# Enable graph store functionality
+enable_graph_store = true
+
+# -----------------------------------------------------------------------------
+# HYBRID PIPELINE: Balanced Configuration
+# -----------------------------------------------------------------------------
+[hybrid]
+
+# Balance between semantic and algorithmic approaches
+[hybrid.weights]
+semantic_weight = 0.6       # Weight for neural/LLM methods
+algorithmic_weight = 0.4    # Weight for classic NLP methods
+adaptive_weighting = true   # Auto-adjust based on query type
+
+# --- HYBRID EMBEDDINGS ---
+[hybrid.embeddings]
+backend = "huggingface"
+model_name = "sentence-transformers/all-MiniLM-L6-v2"
+embedding_dimensions = 384
+normalize_embeddings = true
+
+# --- HYBRID ENTITY EXTRACTION ---
+[hybrid.entity_extraction]
+# Combine NER with LLM validation
+use_ner = true
+use_llm_validation = true
+confidence_threshold = 0.6
+
+entity_types = [
+    "PERSON",
+    "ORGANIZATION",
+    "LOCATION",
+    "CONCEPT",
+    "EVENT"
+]
+
+# --- HYBRID RETRIEVAL ---
+[hybrid.retrieval]
+# Combine vector search with keyword matching
+strategy = "hybrid_fusion"
+vector_weight = 0.7
+keyword_weight = 0.3
+top_k = 10
+
+# --- HYBRID GRAPH ---
+[hybrid.graph]
+use_co_occurrence = true
+use_semantic_similarity = true
+min_relation_confidence = 0.5
+
+# -----------------------------------------------------------------------------
+# TEXT PROCESSING
+# -----------------------------------------------------------------------------
+[text_processing]
+enabled = true
+chunk_size = 512
+chunk_overlap = 128
+min_chunk_size = 100
+max_chunk_size = 1024
+normalize_whitespace = true
+remove_artifacts = true
+
+[text_processing.enrichment]
+enabled = true
+auto_detect_format = true
+extract_keywords = true
+max_keywords_per_chunk = 5
+generate_summaries = true
+
+# -----------------------------------------------------------------------------
+# OLLAMA: LLM Service Configuration
+# -----------------------------------------------------------------------------
+[ollama]
+enabled = true
+host = "http://localhost"
+port = 11434
+chat_model = "llama3.1:8b"
+embedding_model = "nomic-embed-text"
+timeout_seconds = 60
+max_retries = 3
+
+[ollama.generation]
+temperature = 0.2
+top_p = 0.9
+max_tokens = 1000
+stream = false
+
+# -----------------------------------------------------------------------------
+# QUERY PROCESSING
+# -----------------------------------------------------------------------------
+[query_processing]
+enabled = true
+use_advanced_pipeline = true
+use_intent_classification = true
+confidence_threshold = 0.5
+
+# -----------------------------------------------------------------------------
+# PERFORMANCE
+# -----------------------------------------------------------------------------
+[performance]
+batch_processing = true
+batch_size = 32
+worker_threads = 4
+memory_limit_mb = 4096
+cache_embeddings = true
+
+# -----------------------------------------------------------------------------
+# MONITORING
+# -----------------------------------------------------------------------------
+[monitoring]
+enabled = true
+track_entity_consistency = true
+track_relationship_accuracy = true
+log_insights = true
+
+# =============================================================================
+# SURREALDB CONFIGURATION EXAMPLES
+# =============================================================================
+#
+# --- DEVELOPMENT (In-Memory) ---
+# [storage.surrealdb]
+# endpoint = "mem://"
+# namespace = "test"
+# database = "dev"
+# auto_init_schema = true
+#
+# --- PRODUCTION (Persistent Local) ---
+# [storage.surrealdb]
+# endpoint = "rocksdb:///var/lib/graphrag/data"
+# namespace = "production"
+# database = "main"
+# auto_init_schema = true
+# vector_dimension = 1536  # For OpenAI embeddings
+#
+# --- REMOTE/CLOUD ---
+# [storage.surrealdb]
+# endpoint = "wss://cloud.surrealdb.com"
+# namespace = "myorg"
+# database = "graphrag"
+# username = "admin"
+# password = "secure-password"
+# auto_init_schema = false  # Schema managed separately
+#
+# =============================================================================
+# SURREALDB BENEFITS FOR GRAPHRAG:
+#
+# 1. UNIFIED STORAGE
+#    - Single database for documents, vectors, and graphs
+#    - Simplified deployment and maintenance
+#    - Consistent querying across all data types
+#
+# 2. NATIVE GRAPH SUPPORT
+#    - RELATE statements for entity relationships
+#    - Graph traversal with depth control
+#    - Path finding between entities
+#
+# 3. VECTOR SIMILARITY
+#    - Built-in cosine, euclidean, manhattan distances
+#    - MTREE indexing for fast approximate search
+#    - Metadata filtering with vector queries
+#
+# 4. FLEXIBLE DEPLOYMENT
+#    - In-memory for development/testing
+#    - RocksDB for single-node persistence
+#    - WebSocket for distributed/cloud deployments
+#
+# 5. MULTI-TENANT READY
+#    - Namespace isolation for different projects
+#    - Database separation within namespaces
+#    - Fine-grained access control
+#
+# =============================================================================
+# QUICK START:
+#
+# 1. Memory mode (no setup required):
+#    cargo run -- config/templates/surrealdb_unified.toml
+#
+# 2. Persistent mode:
+#    mkdir -p ./data/graphrag
+#    cargo run -- config/templates/surrealdb_unified.toml
+#
+# 3. Remote SurrealDB:
+#    surreal start --bind 0.0.0.0:8000 rocksdb:./data
+#    # Edit endpoint to "ws://localhost:8000"
+#    cargo run -- config/templates/surrealdb_unified.toml
+#
+# =============================================================================

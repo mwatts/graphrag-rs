@@ -201,6 +201,9 @@ impl SurrealDbGraphStore {
     }
 
     /// Create a graph store from an existing database connection
+    ///
+    /// This is useful when you want to share a single database connection
+    /// across multiple storage instances.
     pub fn from_client(
         db: Arc<Surreal<Any>>,
         db_config: SurrealDbConfig,
@@ -213,6 +216,23 @@ impl SurrealDbGraphStore {
             config: graph_config,
             db_config,
         })
+    }
+
+    /// Create a graph store from an existing connection with schema init
+    ///
+    /// Like `from_client`, but also initializes the schema if configured.
+    pub async fn from_client_with_init(
+        db: Arc<Surreal<Any>>,
+        db_config: SurrealDbConfig,
+        graph_config: SurrealDbGraphConfig,
+    ) -> Result<Self> {
+        let store = Self::from_client(db, db_config.clone(), graph_config.clone())?;
+
+        if db_config.auto_init_schema && graph_config.auto_init_schema {
+            store.init_schema().await?;
+        }
+
+        Ok(store)
     }
 
     /// Get the underlying database client

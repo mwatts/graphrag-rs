@@ -19,7 +19,7 @@ use graphrag_core::core::{
 };
 use graphrag_core::storage::surrealdb::{
     DistanceMetric, SurrealDbConfig, SurrealDbGraphConfig, SurrealDbGraphStore, SurrealDbStorage,
-    SurrealDbVectorConfig, SurrealDbVectorStore,
+    SurrealDbUnifiedConfig, SurrealDbUnifiedStorage, SurrealDbVectorConfig, SurrealDbVectorStore,
 };
 use indexmap::IndexMap;
 
@@ -1642,4 +1642,198 @@ async fn test_graph_store_custom_config() {
         .unwrap();
 
     assert_eq!(store.stats().await.node_count, 1);
+}
+
+// =============================================================================
+// UNIFIED STORAGE INTEGRATION TESTS
+// =============================================================================
+
+/// Test 42: Unified storage creation and basic operations
+///
+/// Verifies that unified storage can be created and all stores work together.
+#[tokio::test]
+async fn test_unified_storage_creation() {
+    let db_config = SurrealDbConfig::memory();
+    let unified_config = SurrealDbUnifiedConfig::with_vector_dimension(384);
+
+    let storage = SurrealDbUnifiedStorage::new(db_config, unified_config)
+        .await
+        .unwrap();
+
+    // Verify all stores are available
+    assert!(storage.has_vector_store());
+    assert!(storage.has_graph_store());
+
+    // Health check should pass
+    assert!(storage.health_check().await.unwrap());
+}
+
+/// Test 43: End-to-end GraphRAG workflow with unified storage
+///
+/// Simulates a complete GraphRAG pipeline:
+/// 1. Store documents and chunks
+/// 2. Store entities extracted from chunks
+/// 3. Store entity relationships in graph
+/// 4. Store embeddings for chunks
+/// 5. Search vectors to find relevant chunks
+/// 6. Traverse graph for related entities
+#[tokio::test]
+async fn test_unified_storage_graphrag_workflow() {
+    let db_config = SurrealDbConfig::memory();
+    let unified_config = SurrealDbUnifiedConfig::with_vector_dimension(4); // Small for testing
+
+    let mut storage = SurrealDbUnifiedStorage::new(db_config, unified_config)
+        .await
+        .unwrap();
+
+    // --- STEP 1: Store a document ---
+    let doc = create_test_document(
+        "doc_research",
+        "AI Research Paper",
+        "Machine learning has transformed natural language processing.",
+    );
+    storage.storage_mut().store_document(doc).await.unwrap();
+
+    // --- STEP 2: Store chunks from the document ---
+    let chunk1 = create_test_chunk("chunk_1", "doc_research", "Machine learning transforms NLP");
+    let chunk2 = create_test_chunk(
+        "chunk_2",
+        "doc_research",
+        "Neural networks enable advanced analysis",
+    );
+
+    storage.storage_mut().store_chunk(chunk1).await.unwrap();
+    storage.storage_mut().store_chunk(chunk2).await.unwrap();
+
+    // --- STEP 3: Store entities extracted from text ---
+    let entity_ml = create_graph_entity("ml", "Machine Learning", "CONCEPT");
+    let entity_nlp = create_graph_entity("nlp", "Natural Language Processing", "CONCEPT");
+    let entity_nn = create_graph_entity("nn", "Neural Networks", "TECHNOLOGY");
+
+    let graph = storage.graph_store_mut().unwrap();
+    graph.add_node(entity_ml).await.unwrap();
+    graph.add_node(entity_nlp).await.unwrap();
+    graph.add_node(entity_nn).await.unwrap();
+
+    // --- STEP 4: Create relationships between entities ---
+    let rel_ml_nlp = create_relationship("ml", "nlp", "ENABLES");
+    let rel_nn_ml = create_relationship("nn", "ml", "IMPLEMENTS");
+
+    graph.add_edge("ml", "nlp", rel_ml_nlp).await.unwrap();
+    graph.add_edge("nn", "ml", rel_nn_ml).await.unwrap();
+
+    // --- STEP 5: Store embeddings for chunks ---
+    let vector = storage.vector_store_mut().unwrap();
+    // Chunk 1 embedding (ML/NLP focused)
+    vector
+        .add_vector("chunk_1".to_string(), vec![0.9, 0.8, 0.1, 0.2], None)
+        .await
+        .unwrap();
+    // Chunk 2 embedding (Neural Networks focused)
+    vector
+        .add_vector("chunk_2".to_string(), vec![0.7, 0.3, 0.9, 0.8], None)
+        .await
+        .unwrap();
+
+    // --- STEP 6: Search for relevant chunks (simulating query) ---
+    let query_embedding = vec![0.85, 0.75, 0.15, 0.25]; // Similar to chunk_1
+    let results = vector.search(&query_embedding, 2).await.unwrap();
+
+    assert!(!results.is_empty());
+    assert_eq!(results[0].id, "chunk_1"); // Most similar
+
+    // --- STEP 7: Get related entities from graph ---
+    let graph = storage.graph_store().unwrap();
+    let neighbors = graph.get_neighbors("ml").await.unwrap();
+    assert!(!neighbors.is_empty());
+
+    // Should find NLP as a neighbor (ML -> NLP relationship)
+    let neighbor_ids: Vec<String> = neighbors.iter().map(|n| n.id.0.clone()).collect();
+    assert!(neighbor_ids.contains(&"nlp".to_string()));
+
+    // --- STEP 8: Traverse graph to find all connected entities ---
+    let traversal = graph.traverse("ml", 2).await.unwrap();
+    assert!(traversal.len() >= 2); // Should include ML and at least NLP
+
+    // --- STEP 9: Get overall stats ---
+    let stats = storage.stats().await;
+    assert_eq!(stats.vector_count, 2);
+    assert!(stats.graph_stats.is_some());
+    let graph_stats = stats.graph_stats.unwrap();
+    assert_eq!(graph_stats.node_count, 3);
+    assert_eq!(graph_stats.edge_count, 2);
+}
+
+/// Test 44: Unified storage with shared client
+///
+/// Verifies that all stores share the same database connection.
+#[tokio::test]
+async fn test_unified_storage_shared_client() {
+    let db_config = SurrealDbConfig::memory();
+    let unified_config = SurrealDbUnifiedConfig::default();
+
+    let storage = SurrealDbUnifiedStorage::new(db_config, unified_config)
+        .await
+        .unwrap();
+
+    // All stores should share the same client
+    let main_client = storage.client_arc();
+
+    // Verify we can execute queries on the shared client
+    let result: Vec<serde_json::Value> = main_client
+        .query("RETURN 'shared_client_works'")
+        .await
+        .unwrap()
+        .take(0)
+        .unwrap();
+
+    assert!(!result.is_empty());
+}
+
+/// Test 45: Unified storage without optional stores
+///
+/// Verifies that vector and graph stores can be disabled.
+#[tokio::test]
+async fn test_unified_storage_minimal() {
+    let db_config = SurrealDbConfig::memory();
+    let unified_config = SurrealDbUnifiedConfig::default()
+        .without_vector()
+        .without_graph();
+
+    let mut storage = SurrealDbUnifiedStorage::new(db_config, unified_config)
+        .await
+        .unwrap();
+
+    // Stores should not be available
+    assert!(!storage.has_vector_store());
+    assert!(!storage.has_graph_store());
+    assert!(storage.vector_store().is_none());
+    assert!(storage.graph_store().is_none());
+
+    // Document storage should still work
+    let doc = create_test_document("minimal_doc", "Minimal Test", "Testing minimal storage");
+    storage.storage_mut().store_document(doc).await.unwrap();
+}
+
+/// Test 46: Unified storage from existing client
+///
+/// Verifies that unified storage can be created from an existing connection.
+#[tokio::test]
+async fn test_unified_storage_from_client() {
+    // First create a regular storage to get a client
+    let db_config = SurrealDbConfig::memory();
+    let initial_storage = SurrealDbStorage::new(db_config.clone()).await.unwrap();
+    let shared_client = initial_storage.client_arc();
+
+    // Create unified storage from the shared client
+    let unified_config = SurrealDbUnifiedConfig::with_vector_dimension(4);
+    let unified =
+        SurrealDbUnifiedStorage::from_client_with_init(shared_client, db_config, unified_config)
+            .await
+            .unwrap();
+
+    // Should work normally
+    assert!(unified.has_vector_store());
+    assert!(unified.has_graph_store());
+    assert!(unified.health_check().await.unwrap());
 }
