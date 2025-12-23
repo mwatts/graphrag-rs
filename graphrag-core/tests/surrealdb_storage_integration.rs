@@ -11,10 +11,15 @@
 
 #![cfg(feature = "surrealdb-storage")]
 
+use std::collections::HashMap;
+
 use graphrag_core::core::{
-    traits::AsyncStorage, ChunkId, ChunkMetadata, Document, DocumentId, Entity, EntityId, TextChunk,
+    traits::{AsyncStorage, AsyncVectorStore},
+    ChunkId, ChunkMetadata, Document, DocumentId, Entity, EntityId, TextChunk,
 };
-use graphrag_core::storage::surrealdb::{SurrealDbConfig, SurrealDbStorage};
+use graphrag_core::storage::surrealdb::{
+    DistanceMetric, SurrealDbConfig, SurrealDbStorage, SurrealDbVectorConfig, SurrealDbVectorStore,
+};
 use indexmap::IndexMap;
 
 /// Helper to create a test entity with the given ID
@@ -519,4 +524,559 @@ async fn test_isolated_databases() {
 
     assert_eq!(retrieved1.name, "Entity in DB1");
     assert_eq!(retrieved2.name, "Entity in DB2");
+}
+
+// =============================================================================
+// Vector Store Integration Tests
+// =============================================================================
+
+/// Helper to create a test SurrealDbVectorStore with in-memory database
+async fn create_test_vector_store(dimension: usize) -> SurrealDbVectorStore {
+    let db_config = SurrealDbConfig::memory();
+    let vector_config = SurrealDbVectorConfig::with_dimension(dimension);
+    SurrealDbVectorStore::new(db_config, vector_config)
+        .await
+        .unwrap()
+}
+
+/// Helper to create a test SurrealDbVectorStore with custom config
+async fn create_test_vector_store_with_config(
+    dimension: usize,
+    metric: DistanceMetric,
+    table_name: &str,
+) -> SurrealDbVectorStore {
+    let db_config = SurrealDbConfig::memory();
+    let vector_config = SurrealDbVectorConfig::with_dimension(dimension)
+        .with_metric(metric)
+        .with_table_name(table_name.to_string());
+    SurrealDbVectorStore::new(db_config, vector_config)
+        .await
+        .unwrap()
+}
+
+/// Test 14: Vector store basic add and search
+///
+/// Verifies adding a vector and finding it via search.
+#[tokio::test]
+async fn test_vector_store_add_and_search() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add a vector with metadata
+    let embedding = vec![0.1, 0.2, 0.3, 0.4];
+    let metadata = Some(HashMap::from([
+        ("source".to_string(), "test".to_string()),
+        ("type".to_string(), "integration".to_string()),
+    ]));
+
+    store
+        .add_vector("vec1".to_string(), embedding.clone(), metadata)
+        .await
+        .unwrap();
+
+    // Search for it - should find exact match
+    let results = store.search(&embedding, 1).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, "vec1");
+    assert!(results[0].distance < 0.01); // Very small distance for exact match
+
+    // Verify metadata is returned
+    let result_metadata = results[0].metadata.as_ref().unwrap();
+    assert_eq!(result_metadata.get("source").unwrap(), "test");
+    assert_eq!(result_metadata.get("type").unwrap(), "integration");
+}
+
+/// Test 15: Vector store similarity search with cosine
+///
+/// Verifies similarity search returns correct results ordered by similarity.
+#[tokio::test]
+async fn test_vector_store_similarity_search_cosine() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add vectors
+    store
+        .add_vector(
+            "vec_a".to_string(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            Some(HashMap::from([("label".to_string(), "A".to_string())])),
+        )
+        .await
+        .unwrap();
+    store
+        .add_vector(
+            "vec_b".to_string(),
+            vec![0.9, 0.1, 0.0, 0.0],
+            Some(HashMap::from([("label".to_string(), "B".to_string())])),
+        )
+        .await
+        .unwrap();
+    store
+        .add_vector(
+            "vec_c".to_string(),
+            vec![0.0, 1.0, 0.0, 0.0],
+            Some(HashMap::from([("label".to_string(), "C".to_string())])),
+        )
+        .await
+        .unwrap();
+    store
+        .add_vector(
+            "vec_d".to_string(),
+            vec![0.0, 0.0, 1.0, 0.0],
+            Some(HashMap::from([("label".to_string(), "D".to_string())])),
+        )
+        .await
+        .unwrap();
+
+    // Search for vector similar to [1.0, 0.0, 0.0, 0.0]
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let results = store.search(&query, 3).await.unwrap();
+
+    assert_eq!(results.len(), 3);
+
+    // First result should be vec_a (exact match, distance ~0)
+    assert_eq!(results[0].id, "vec_a");
+    assert!(results[0].distance < 0.01);
+
+    // Second result should be vec_b (very similar, small distance)
+    assert_eq!(results[1].id, "vec_b");
+    assert!(results[1].distance < 0.2);
+
+    // Third result should be vec_c or vec_d (orthogonal, high distance)
+    assert!(results[2].distance > 0.5);
+}
+
+/// Test 16: Vector store with Euclidean distance
+///
+/// Verifies that Euclidean distance metric works correctly.
+#[tokio::test]
+async fn test_vector_store_euclidean_distance() {
+    let mut store =
+        create_test_vector_store_with_config(3, DistanceMetric::Euclidean, "vector_euclidean")
+            .await;
+
+    // Add vectors
+    store
+        .add_vector("origin".to_string(), vec![0.0, 0.0, 0.0], None)
+        .await
+        .unwrap();
+    store
+        .add_vector("near".to_string(), vec![0.1, 0.1, 0.1], None)
+        .await
+        .unwrap();
+    store
+        .add_vector("far".to_string(), vec![1.0, 1.0, 1.0], None)
+        .await
+        .unwrap();
+
+    // Search from origin - nearest should be origin itself, then near, then far
+    let query = vec![0.0, 0.0, 0.0];
+    let results = store.search(&query, 3).await.unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].id, "origin"); // Distance 0
+    assert_eq!(results[1].id, "near"); // Distance ~0.173
+    assert_eq!(results[2].id, "far"); // Distance ~1.732
+
+    // Verify distances are increasing
+    assert!(results[0].distance < results[1].distance);
+    assert!(results[1].distance < results[2].distance);
+}
+
+/// Test 17: Vector store batch operations
+///
+/// Verifies adding multiple vectors in batch.
+#[tokio::test]
+async fn test_vector_store_batch_add() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Build batch
+    let batch: Vec<(String, Vec<f32>, Option<HashMap<String, String>>)> = (0..10)
+        .map(|i| {
+            let id = format!("batch_vec_{}", i);
+            let embedding = vec![i as f32 * 0.1, 0.5, 0.5, 0.5];
+            let metadata = Some(HashMap::from([("index".to_string(), i.to_string())]));
+            (id, embedding, metadata)
+        })
+        .collect();
+
+    // Add batch
+    store.add_vectors_batch(batch).await.unwrap();
+
+    // Verify count
+    let count = store.len().await;
+    assert_eq!(count, 10);
+
+    // Verify vectors are searchable
+    let query = vec![0.5, 0.5, 0.5, 0.5];
+    let results = store.search(&query, 10).await.unwrap();
+    assert_eq!(results.len(), 10);
+}
+
+/// Test 18: Vector store update (upsert)
+///
+/// Verifies that storing a vector with the same ID updates it.
+#[tokio::test]
+async fn test_vector_store_update() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add initial vector
+    store
+        .add_vector(
+            "update_test".to_string(),
+            vec![0.1, 0.2, 0.3, 0.4],
+            Some(HashMap::from([("version".to_string(), "1".to_string())])),
+        )
+        .await
+        .unwrap();
+
+    // Verify initial state
+    let results = store.search(&[0.1, 0.2, 0.3, 0.4], 1).await.unwrap();
+    assert_eq!(results[0].id, "update_test");
+    assert_eq!(
+        results[0]
+            .metadata
+            .as_ref()
+            .unwrap()
+            .get("version")
+            .unwrap(),
+        "1"
+    );
+
+    // Update with new values
+    store
+        .add_vector(
+            "update_test".to_string(),
+            vec![0.5, 0.6, 0.7, 0.8],
+            Some(HashMap::from([("version".to_string(), "2".to_string())])),
+        )
+        .await
+        .unwrap();
+
+    // Verify update - search for new embedding should find it
+    let results = store.search(&[0.5, 0.6, 0.7, 0.8], 1).await.unwrap();
+    assert_eq!(results[0].id, "update_test");
+    assert_eq!(
+        results[0]
+            .metadata
+            .as_ref()
+            .unwrap()
+            .get("version")
+            .unwrap(),
+        "2"
+    );
+
+    // Count should still be 1
+    assert_eq!(store.len().await, 1);
+}
+
+/// Test 19: Vector store remove
+///
+/// Verifies removing a vector from the store.
+#[tokio::test]
+async fn test_vector_store_remove() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add vectors
+    store
+        .add_vector("remove_1".to_string(), vec![0.1, 0.2, 0.3, 0.4], None)
+        .await
+        .unwrap();
+    store
+        .add_vector("remove_2".to_string(), vec![0.5, 0.6, 0.7, 0.8], None)
+        .await
+        .unwrap();
+
+    assert_eq!(store.len().await, 2);
+
+    // Remove one
+    let removed = store.remove_vector("remove_1").await.unwrap();
+    assert!(removed);
+
+    // Verify removal
+    assert_eq!(store.len().await, 1);
+
+    // Search for removed vector's embedding shouldn't find "remove_1"
+    let results = store.search(&[0.1, 0.2, 0.3, 0.4], 10).await.unwrap();
+    assert!(!results.iter().any(|r| r.id == "remove_1"));
+
+    // Other vector should still exist
+    let results = store.search(&[0.5, 0.6, 0.7, 0.8], 1).await.unwrap();
+    assert_eq!(results[0].id, "remove_2");
+
+    // Removing non-existent should return false
+    let removed = store.remove_vector("nonexistent").await.unwrap();
+    assert!(!removed);
+}
+
+/// Test 20: Vector store remove batch
+///
+/// Verifies removing multiple vectors via batch.
+#[tokio::test]
+async fn test_vector_store_remove_batch() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add vectors
+    for i in 0..5 {
+        store
+            .add_vector(format!("remove_batch_{}", i), vec![0.1 * i as f32; 4], None)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(store.len().await, 5);
+
+    // Remove some
+    let ids_to_remove: Vec<&str> = vec!["remove_batch_0", "remove_batch_2", "remove_batch_4"];
+    let results = store.remove_vectors_batch(&ids_to_remove).await.unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert!(results.iter().all(|&removed| removed));
+
+    // Verify count
+    assert_eq!(store.len().await, 2);
+}
+
+/// Test 21: Vector store empty behavior
+///
+/// Verifies correct behavior when store is empty.
+#[tokio::test]
+async fn test_vector_store_empty_behavior() {
+    let store = create_test_vector_store(4).await;
+
+    // Empty checks
+    assert_eq!(store.len().await, 0);
+
+    // Search on empty store
+    let results = store.search(&[0.1, 0.2, 0.3, 0.4], 5).await.unwrap();
+    assert!(results.is_empty());
+}
+
+/// Test 22: Vector store with large embeddings
+///
+/// Verifies handling of typical embedding sizes (384 dimensions).
+#[tokio::test]
+async fn test_vector_store_large_embeddings() {
+    // Test with 384 dimensions (common for small models)
+    let mut store = create_test_vector_store(384).await;
+
+    let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+    let metadata = Some(HashMap::from([("model".to_string(), "small".to_string())]));
+
+    store
+        .add_vector("large_embed_1".to_string(), embedding.clone(), metadata)
+        .await
+        .unwrap();
+
+    // Search should find it
+    let results = store.search(&embedding, 1).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, "large_embed_1");
+    assert!(results[0].distance < 0.01); // Exact match
+}
+
+/// Test 23: Vector store search with top_k limits
+///
+/// Verifies that search respects the top_k parameter.
+#[tokio::test]
+async fn test_vector_store_search_topk() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add 20 vectors
+    for i in 0..20 {
+        store
+            .add_vector(
+                format!("topk_{}", i),
+                vec![i as f32 * 0.05, 0.5, 0.5, 0.5],
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Search with different top_k values
+    let query = vec![0.5, 0.5, 0.5, 0.5];
+
+    let results_5 = store.search(&query, 5).await.unwrap();
+    assert_eq!(results_5.len(), 5);
+
+    let results_10 = store.search(&query, 10).await.unwrap();
+    assert_eq!(results_10.len(), 10);
+
+    let results_all = store.search(&query, 100).await.unwrap();
+    assert_eq!(results_all.len(), 20); // Can't return more than exist
+}
+
+/// Test 24: Vector store metadata in search results
+///
+/// Verifies that metadata is correctly returned in search results.
+#[tokio::test]
+async fn test_vector_store_metadata_in_search() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add vectors with different metadata
+    store
+        .add_vector(
+            "meta_a".to_string(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            Some(HashMap::from([
+                ("category".to_string(), "science".to_string()),
+                ("priority".to_string(), "high".to_string()),
+            ])),
+        )
+        .await
+        .unwrap();
+    store
+        .add_vector(
+            "meta_b".to_string(),
+            vec![0.9, 0.1, 0.0, 0.0],
+            Some(HashMap::from([
+                ("category".to_string(), "tech".to_string()),
+                ("priority".to_string(), "low".to_string()),
+            ])),
+        )
+        .await
+        .unwrap();
+
+    // Search and verify metadata is in results
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let results = store.search(&query, 2).await.unwrap();
+
+    // First result should be meta_a with its metadata
+    assert_eq!(results[0].id, "meta_a");
+    let metadata = results[0].metadata.as_ref().unwrap();
+    assert_eq!(metadata.get("category").unwrap(), "science");
+    assert_eq!(metadata.get("priority").unwrap(), "high");
+}
+
+/// Test 25: Vector store with different distance metrics
+///
+/// Verifies that different distance metrics produce valid rankings.
+#[tokio::test]
+async fn test_vector_store_distance_metrics() {
+    // Setup vectors
+    let v1 = vec![1.0, 0.0, 0.0];
+    let v2 = vec![0.5, 0.5, 0.0];
+    let v3 = vec![0.33, 0.33, 0.33];
+
+    // Cosine similarity store
+    let mut cosine_store =
+        create_test_vector_store_with_config(3, DistanceMetric::Cosine, "metric_cosine").await;
+    cosine_store
+        .add_vector("v1".to_string(), v1.clone(), None)
+        .await
+        .unwrap();
+    cosine_store
+        .add_vector("v2".to_string(), v2.clone(), None)
+        .await
+        .unwrap();
+    cosine_store
+        .add_vector("v3".to_string(), v3.clone(), None)
+        .await
+        .unwrap();
+
+    // Manhattan distance store
+    let mut manhattan_store =
+        create_test_vector_store_with_config(3, DistanceMetric::Manhattan, "metric_manhattan")
+            .await;
+    manhattan_store
+        .add_vector("v1".to_string(), v1.clone(), None)
+        .await
+        .unwrap();
+    manhattan_store
+        .add_vector("v2".to_string(), v2.clone(), None)
+        .await
+        .unwrap();
+    manhattan_store
+        .add_vector("v3".to_string(), v3.clone(), None)
+        .await
+        .unwrap();
+
+    // Query with [1, 0, 0]
+    let query = vec![1.0, 0.0, 0.0];
+
+    let cosine_results = cosine_store.search(&query, 3).await.unwrap();
+    let manhattan_results = manhattan_store.search(&query, 3).await.unwrap();
+
+    // Both should return v1 first (exact match)
+    assert_eq!(cosine_results[0].id, "v1");
+    assert_eq!(manhattan_results[0].id, "v1");
+
+    // Both should return all 3 results
+    assert_eq!(cosine_results.len(), 3);
+    assert_eq!(manhattan_results.len(), 3);
+}
+
+/// Test 26: Vector store isolated by table name
+///
+/// Verifies that different table names create isolated stores.
+#[tokio::test]
+async fn test_vector_store_table_isolation() {
+    let db_config = SurrealDbConfig::memory();
+
+    // Create two stores with different table names
+    let config1 = SurrealDbVectorConfig::with_dimension(4).with_table_name("vectors_1".to_string());
+    let config2 = SurrealDbVectorConfig::with_dimension(4).with_table_name("vectors_2".to_string());
+
+    let mut store1 = SurrealDbVectorStore::new(db_config.clone(), config1)
+        .await
+        .unwrap();
+    let mut store2 = SurrealDbVectorStore::new(db_config, config2).await.unwrap();
+
+    // Add to store1
+    store1
+        .add_vector("shared_id".to_string(), vec![1.0, 0.0, 0.0, 0.0], None)
+        .await
+        .unwrap();
+
+    // Add different vector with same ID to store2
+    store2
+        .add_vector("shared_id".to_string(), vec![0.0, 1.0, 0.0, 0.0], None)
+        .await
+        .unwrap();
+
+    // Verify isolation via search
+    let results1 = store1.search(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap();
+    let results2 = store2.search(&[0.0, 1.0, 0.0, 0.0], 1).await.unwrap();
+
+    assert_eq!(results1[0].id, "shared_id");
+    assert!(results1[0].distance < 0.01); // Exact match for store1's embedding
+
+    assert_eq!(results2[0].id, "shared_id");
+    assert!(results2[0].distance < 0.01); // Exact match for store2's embedding
+
+    // Each store should have count of 1
+    assert_eq!(store1.len().await, 1);
+    assert_eq!(store2.len().await, 1);
+}
+
+/// Test 27: Vector store search with threshold
+///
+/// Verifies search_with_threshold filters results correctly.
+#[tokio::test]
+async fn test_vector_store_search_with_threshold() {
+    let mut store = create_test_vector_store(4).await;
+
+    // Add vectors at varying distances
+    store
+        .add_vector("exact".to_string(), vec![1.0, 0.0, 0.0, 0.0], None)
+        .await
+        .unwrap();
+    store
+        .add_vector("close".to_string(), vec![0.9, 0.1, 0.0, 0.0], None)
+        .await
+        .unwrap();
+    store
+        .add_vector("far".to_string(), vec![0.0, 1.0, 0.0, 0.0], None)
+        .await
+        .unwrap();
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+
+    // Search with tight threshold - should only get exact and close
+    let results = store.search_with_threshold(&query, 10, 0.2).await.unwrap();
+    assert!(results.len() >= 1 && results.len() <= 2);
+    assert!(results.iter().all(|r| r.distance <= 0.2));
+
+    // Search with loose threshold - should get all
+    let results = store.search_with_threshold(&query, 10, 2.0).await.unwrap();
+    assert_eq!(results.len(), 3);
 }

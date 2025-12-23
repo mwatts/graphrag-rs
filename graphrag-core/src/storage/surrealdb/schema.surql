@@ -40,3 +40,22 @@ DEFINE FIELD relation_type ON relates_to TYPE string;
 DEFINE FIELD confidence ON relates_to TYPE float;
 DEFINE FIELD context ON relates_to TYPE array DEFAULT [];
 DEFINE INDEX idx_relates_type ON relates_to FIELDS relation_type;
+
+-- =============================================================================
+-- Vector Table (Embeddings)
+-- =============================================================================
+-- Stores vector embeddings for similarity search
+-- Supports multiple distance metrics: cosine, euclidean, manhattan
+
+DEFINE TABLE vector SCHEMALESS;
+DEFINE INDEX idx_vector_id ON vector FIELDS id UNIQUE;
+DEFINE INDEX idx_vector_source ON vector FIELDS source_type, source_id;
+
+-- MTREE index for approximate nearest neighbor search
+-- Note: Adjust DIMENSION to match your embedding model:
+--   384: all-MiniLM-L6-v2
+--   768: all-mpnet-base-v2
+--   1024: voyage-3-large, bge-large-en-v1.5
+--   1536: text-embedding-3-small (OpenAI)
+-- Uncomment and adjust as needed:
+-- DEFINE INDEX idx_vector_embedding ON vector FIELDS embedding MTREE DIMENSION 384 TYPE F32 DIST COSINE;

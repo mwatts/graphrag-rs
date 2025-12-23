@@ -70,7 +70,9 @@
 mod config;
 mod error;
 mod storage;
+mod vector;
 
 pub use config::{SurrealDbConfig, SurrealDbCredentials};
 pub use error::SurrealDbStorageError;
 pub use storage::SurrealDbStorage;
+pub use vector::{DistanceMetric, SurrealDbVectorConfig, SurrealDbVectorStore};
