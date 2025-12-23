@@ -2,23 +2,26 @@
 
 ## Overview
 
-This document describes the design for integrating SurrealDB as a storage backend for graphrag-core, implementing the `AsyncStorage` trait. SurrealDB is particularly well-suited for GraphRAG workloads due to its native multi-model support (document, graph, relational, and vector), which aligns with the core data structures: documents, entities, chunks, and relationships.
+This document describes the design for integrating SurrealDB as a storage backend for graphrag-core. SurrealDB is particularly well-suited for GraphRAG workloads due to its native multi-model support (document, graph, relational, and vector), which aligns with the core data structures: documents, entities, chunks, and relationships.
+
+**Implementation Status**: The `AsyncStorage` trait implementation is complete with 16 unit tests and 13 integration tests passing.
 
 ## Scope
 
-This design is constrained to:
-1. Implementing the `AsyncStorage` trait from `graphrag-core/src/core/traits.rs`
-2. Required configuration for the SurrealDB connection
+### Completed (Phase 1)
+1. `AsyncStorage` trait implementation for documents, entities, and chunks
+2. Configuration for SurrealDB connection (memory, RocksDB, WebSocket, HTTP)
 3. Feature flag integration for optional compilation
+4. Schema definition with indexes
+5. Comprehensive test coverage
 
-Out of scope:
-- Vector store implementation (`AsyncVectorStore` trait)
-- Graph store implementation (`AsyncGraphStore` trait)
-- These may be implemented separately as SurrealDB supports all these models natively
+### Future Work (Phase 2 & 3)
+- **Phase 2**: Vector store implementation (`AsyncVectorStore` trait) - See [Vector Store Design](#vector-store-design)
+- **Phase 3**: Graph store implementation (`AsyncGraphStore` trait) - See [Graph Store Design](#graph-store-design)
 
 ## Feature Flag
 
-Add to `graphrag-core/Cargo.toml`:
+In `graphrag-core/Cargo.toml`:
 
 ```toml
 [features]
@@ -48,7 +51,7 @@ Feature notes:
 
 ### Record ID Strategy
 
-SurrealDB uses composite record IDs (`table:id`). Map GraphRAG IDs directly:
+SurrealDB uses composite record IDs (`table:id`). GraphRAG IDs are mapped directly:
 
 ```rust
 // DocumentId("doc123") -> document:doc123
@@ -56,50 +59,42 @@ SurrealDB uses composite record IDs (`table:id`). Map GraphRAG IDs directly:
 // ChunkId("chunk789") -> chunk:chunk789
 ```
 
+**Implementation Note**: The actual implementation uses `type::thing('table', $id)` for record references and `meta::id(id)` to convert SurrealDB's `Thing` type back to strings for retrieval.
+
 ## Schema Definition
 
+The schema uses `SCHEMALESS` tables to allow flexible Rust struct serialization:
+
 ```sql
--- Documents table (document model for flexible metadata)
-DEFINE TABLE document SCHEMAFULL;
-DEFINE FIELD id ON document TYPE string;
-DEFINE FIELD title ON document TYPE string;
-DEFINE FIELD content ON document TYPE string;
-DEFINE FIELD metadata ON document FLEXIBLE TYPE object;
-DEFINE FIELD created_at ON document TYPE datetime DEFAULT time::now();
+-- graphrag-core/src/storage/surrealdb/schema.surql
+
+-- Documents Table
+DEFINE TABLE document SCHEMALESS;
 DEFINE INDEX idx_document_id ON document FIELDS id UNIQUE;
 
--- Entities table (hybrid: document + graph via relationships)
-DEFINE TABLE entity SCHEMAFULL;
-DEFINE FIELD id ON entity TYPE string;
-DEFINE FIELD name ON entity TYPE string;
-DEFINE FIELD entity_type ON entity TYPE string;
-DEFINE FIELD confidence ON entity TYPE float;
-DEFINE FIELD embedding ON entity TYPE option<array<float>>;
-DEFINE FIELD mentions ON entity TYPE array<object>;
+-- Entities Table
+DEFINE TABLE entity SCHEMALESS;
 DEFINE INDEX idx_entity_id ON entity FIELDS id UNIQUE;
 DEFINE INDEX idx_entity_type ON entity FIELDS entity_type;
 DEFINE INDEX idx_entity_name ON entity FIELDS name;
 
--- Chunks table (document model with vector support)
-DEFINE TABLE chunk SCHEMAFULL;
-DEFINE FIELD id ON chunk TYPE string;
-DEFINE FIELD document_id ON chunk TYPE string;
-DEFINE FIELD content ON chunk TYPE string;
-DEFINE FIELD start_offset ON chunk TYPE int;
-DEFINE FIELD end_offset ON chunk TYPE int;
-DEFINE FIELD embedding ON chunk TYPE option<array<float>>;
-DEFINE FIELD entity_ids ON chunk TYPE array<string>;
-DEFINE FIELD metadata ON chunk TYPE object;
+-- Chunks Table
+DEFINE TABLE chunk SCHEMALESS;
 DEFINE INDEX idx_chunk_id ON chunk FIELDS id UNIQUE;
 DEFINE INDEX idx_chunk_document ON chunk FIELDS document_id;
 
--- Relationships as graph edges
+-- Relationships as Graph Edges
 DEFINE TABLE relates_to TYPE RELATION IN entity OUT entity;
 DEFINE FIELD relation_type ON relates_to TYPE string;
 DEFINE FIELD confidence ON relates_to TYPE float;
-DEFINE FIELD context ON relates_to TYPE array<string>;
+DEFINE FIELD context ON relates_to TYPE array DEFAULT [];
 DEFINE INDEX idx_relates_type ON relates_to FIELDS relation_type;
 ```
+
+**Design Decision**: `SCHEMALESS` was chosen over `SCHEMAFULL` because:
+1. Rust structs with newtype wrappers (e.g., `DocumentId(String)`) require flexible serialization
+2. The `#[serde(transparent)]` attribute on ID types ensures they serialize as plain strings
+3. Allows for future field additions without schema migrations
 
 ## Implementation
 
@@ -108,9 +103,9 @@ DEFINE INDEX idx_relates_type ON relates_to FIELDS relation_type;
 ```
 graphrag-core/src/
 ├── storage/
-│   ├── mod.rs           # Storage module exports (existing)
+│   ├── mod.rs           # Storage module exports with feature gate
 │   └── surrealdb/
-│       ├── mod.rs       # SurrealDB submodule exports, feature gate
+│       ├── mod.rs       # SurrealDB submodule exports
 │       ├── storage.rs   # AsyncStorage implementation
 │       ├── config.rs    # Configuration types
 │       ├── error.rs     # SurrealDB-specific error types
@@ -122,70 +117,32 @@ graphrag-core/src/
 ```rust
 // graphrag-core/src/storage/surrealdb/config.rs
 
-use serde::{Deserialize, Serialize};
-
 /// SurrealDB connection configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurrealDbConfig {
-    /// Connection endpoint
-    /// - "mem://" for in-memory (development)
-    /// - "rocksdb://path/to/db" for persistent local
-    /// - "ws://host:port" for remote WebSocket
-    /// - "http://host:port" for remote HTTP
+    /// Connection endpoint (mem://, rocksdb://, ws://, http://)
     pub endpoint: String,
-    
     /// Namespace for data isolation
     pub namespace: String,
-    
     /// Database name within namespace
     pub database: String,
-    
     /// Optional authentication credentials
     pub credentials: Option<SurrealDbCredentials>,
-    
     /// Whether to initialize schema on connect
     pub auto_init_schema: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SurrealDbCredentials {
-    pub username: String,
-    pub password: String,
-}
-
-impl Default for SurrealDbConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: "mem://".to_string(),
-            namespace: "graphrag".to_string(),
-            database: "default".to_string(),
-            credentials: None,
-            auto_init_schema: true,
-        }
-    }
-}
-
 impl SurrealDbConfig {
-    /// Create configuration for in-memory storage (development/testing)
-    pub fn memory() -> Self {
-        Self::default()
-    }
+    pub fn memory() -> Self { /* ... */ }
+    pub fn rocksdb(path: impl Into<String>) -> Self { /* ... */ }
+    pub fn websocket(host: impl Into<String>, port: u16) -> Self { /* ... */ }
+    pub fn http(host: impl Into<String>, port: u16) -> Self { /* ... */ }
     
-    /// Create configuration for persistent local storage
-    pub fn rocksdb(path: impl Into<String>) -> Self {
-        Self {
-            endpoint: format!("rocksdb://{}", path.into()),
-            ..Self::default()
-        }
-    }
-    
-    /// Create configuration for remote WebSocket connection
-    pub fn websocket(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            endpoint: format!("ws://{}:{}", host.into(), port),
-            ..Self::default()
-        }
-    }
+    // Builder methods
+    pub fn with_namespace(self, namespace: impl Into<String>) -> Self { /* ... */ }
+    pub fn with_database(self, database: impl Into<String>) -> Self { /* ... */ }
+    pub fn with_credentials(self, username: impl Into<String>, password: impl Into<String>) -> Self { /* ... */ }
+    pub fn without_auto_schema(self) -> Self { /* ... */ }
 }
 ```
 
@@ -194,9 +151,6 @@ impl SurrealDbConfig {
 ```rust
 // graphrag-core/src/storage/surrealdb/error.rs
 
-use thiserror::Error;
-
-/// Errors specific to SurrealDB storage operations
 #[derive(Debug, Error)]
 pub enum SurrealDbStorageError {
     #[error("Connection failed: {0}")]
@@ -213,107 +167,33 @@ pub enum SurrealDbStorageError {
     
     #[error("Serialization error: {0}")]
     SerializationError(String),
-    
-    #[error("Record not found: {table}:{id}")]
-    NotFound { table: String, id: String },
-    
-    #[error("Duplicate record: {table}:{id}")]
-    DuplicateRecord { table: String, id: String },
 }
 
-impl From<surrealdb::Error> for SurrealDbStorageError {
-    fn from(err: surrealdb::Error) -> Self {
-        Self::QueryFailed(err.to_string())
-    }
-}
+impl From<SurrealDbStorageError> for GraphRAGError { /* ... */ }
 ```
 
 ### Storage Implementation
 
+The implementation uses raw SQL queries with bind parameters to handle SurrealDB's type system:
+
 ```rust
 // graphrag-core/src/storage/surrealdb/storage.rs
 
-use std::sync::Arc;
-use async_trait::async_trait;
-use surrealdb::{engine::any::Any, Surreal};
-
-use crate::core::{
-    traits::AsyncStorage,
-    Document, Entity, TextChunk, Result, GraphRAGError,
-};
-use super::config::SurrealDbConfig;
-use super::error::SurrealDbStorageError;
-
-/// SurrealDB implementation of AsyncStorage
 pub struct SurrealDbStorage {
     db: Arc<Surreal<Any>>,
     config: SurrealDbConfig,
 }
 
 impl SurrealDbStorage {
-    /// Create a new SurrealDB storage instance
-    ///
-    /// # Arguments
-    /// * `config` - Configuration for the SurrealDB connection
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = SurrealDbConfig::memory();
-    /// let storage = SurrealDbStorage::new(config).await?;
-    /// ```
     pub async fn new(config: SurrealDbConfig) -> Result<Self> {
-        let db = Surreal::new::<Any>(&config.endpoint)
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to connect to SurrealDB: {}", e),
-            })?;
-        
-        // Select namespace and database
-        db.use_ns(&config.namespace)
-            .use_db(&config.database)
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to select namespace/database: {}", e),
-            })?;
-        
-        // Authenticate if credentials provided
-        if let Some(ref creds) = config.credentials {
-            db.signin(surrealdb::opt::auth::Root {
-                username: &creds.username,
-                password: &creds.password,
-            })
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Authentication failed: {}", e),
-            })?;
-        }
-        
-        let storage = Self {
-            db: Arc::new(db),
-            config,
-        };
-        
-        // Initialize schema if configured
-        if storage.config.auto_init_schema {
-            storage.init_schema().await?;
-        }
-        
-        Ok(storage)
+        // Uses surrealdb::engine::any::connect for dynamic endpoint parsing
+        let db = surrealdb::engine::any::connect(&config.endpoint).await?;
+        db.use_ns(&config.namespace).use_db(&config.database).await?;
+        // ... authentication and schema initialization
     }
     
-    /// Initialize the database schema
-    async fn init_schema(&self) -> Result<()> {
-        let schema = include_str!("schema.surql");
-        self.db.query(schema).await.map_err(|e| GraphRAGError::Storage {
-            message: format!("Schema initialization failed: {}", e),
-        })?;
-        Ok(())
-    }
-    
-    /// Get reference to the underlying SurrealDB client
-    pub fn client(&self) -> &Surreal<Any> {
-        &self.db
-    }
+    pub fn client(&self) -> &Surreal<Any> { &self.db }
+    pub fn client_arc(&self) -> Arc<Surreal<Any>> { Arc::clone(&self.db) }
 }
 
 #[async_trait]
@@ -322,322 +202,838 @@ impl AsyncStorage for SurrealDbStorage {
     type Document = Document;
     type Chunk = TextChunk;
     type Error = GraphRAGError;
-    
+
     async fn store_entity(&mut self, entity: Self::Entity) -> Result<String> {
         let id = entity.id.to_string();
-        
-        // Use upsert semantics for idempotent storage
-        let _: Option<Entity> = self.db
-            .upsert(("entity", &id))
-            .content(&entity)
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to store entity: {}", e),
-            })?;
-        
-        Ok(id)
-    }
-    
-    async fn retrieve_entity(&self, id: &str) -> Result<Option<Self::Entity>> {
-        let entity: Option<Entity> = self.db
-            .select(("entity", id))
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to retrieve entity: {}", e),
-            })?;
-        
-        Ok(entity)
-    }
-    
-    async fn store_document(&mut self, document: Self::Document) -> Result<String> {
-        let id = document.id.to_string();
-        
-        let _: Option<Document> = self.db
-            .upsert(("document", &id))
-            .content(&document)
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to store document: {}", e),
-            })?;
-        
-        Ok(id)
-    }
-    
-    async fn retrieve_document(&self, id: &str) -> Result<Option<Self::Document>> {
-        let document: Option<Document> = self.db
-            .select(("document", id))
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to retrieve document: {}", e),
-            })?;
-        
-        Ok(document)
-    }
-    
-    async fn store_chunk(&mut self, chunk: Self::Chunk) -> Result<String> {
-        let id = chunk.id.to_string();
-        
-        let _: Option<TextChunk> = self.db
-            .upsert(("chunk", &id))
-            .content(&chunk)
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to store chunk: {}", e),
-            })?;
-        
-        Ok(id)
-    }
-    
-    async fn retrieve_chunk(&self, id: &str) -> Result<Option<Self::Chunk>> {
-        let chunk: Option<TextChunk> = self.db
-            .select(("chunk", id))
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to retrieve chunk: {}", e),
-            })?;
-        
-        Ok(chunk)
-    }
-    
-    async fn list_entities(&self) -> Result<Vec<String>> {
-        let mut response = self.db
-            .query("SELECT id FROM entity")
-            .await
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Failed to list entities: {}", e),
-            })?;
-        
-        let entities: Vec<EntityIdRecord> = response.take(0).map_err(|e| {
-            GraphRAGError::Storage {
-                message: format!("Failed to parse entity list: {}", e),
-            }
-        })?;
-        
-        Ok(entities.into_iter().map(|r| r.id).collect())
-    }
-    
-    async fn store_entities_batch(&mut self, entities: Vec<Self::Entity>) -> Result<Vec<String>> {
-        let mut ids = Vec::with_capacity(entities.len());
-        
-        // Use transaction for batch atomicity
-        self.db.query("BEGIN TRANSACTION").await.map_err(|e| {
-            GraphRAGError::Storage {
-                message: format!("Failed to begin transaction: {}", e),
-            }
-        })?;
-        
-        for entity in entities {
-            let id = entity.id.to_string();
-            let _: Option<Entity> = self.db
-                .upsert(("entity", &id))
-                .content(&entity)
-                .await
-                .map_err(|e| {
-                    // Attempt rollback on error
-                    let _ = futures::executor::block_on(
-                        self.db.query("CANCEL TRANSACTION")
-                    );
-                    GraphRAGError::Storage {
-                        message: format!("Failed to store entity in batch: {}", e),
-                    }
-                })?;
-            ids.push(id);
-        }
-        
-        self.db.query("COMMIT TRANSACTION").await.map_err(|e| {
-            GraphRAGError::Storage {
-                message: format!("Failed to commit transaction: {}", e),
-            }
-        })?;
-        
-        Ok(ids)
-    }
-    
-    async fn health_check(&self) -> Result<bool> {
-        // Simple query to verify connection
+        // Serialize to JSON first to handle newtype wrappers
+        let json_str = serde_json::to_string(&entity)?;
         self.db
-            .query("RETURN true")
-            .await
-            .map(|_| true)
-            .map_err(|e| GraphRAGError::Storage {
-                message: format!("Health check failed: {}", e),
-            })
+            .query("UPSERT type::thing('entity', $id) CONTENT $data")
+            .bind(("id", id.clone()))
+            .bind(("data", serde_json::from_str::<serde_json::Value>(&json_str)?))
+            .await?;
+        Ok(id)
+    }
+
+    async fn retrieve_entity(&self, id: &str) -> Result<Option<Self::Entity>> {
+        // Use meta::id(id) to convert SurrealDB Thing back to string
+        let mut response = self.db
+            .query("SELECT *, meta::id(id) as id FROM type::thing('entity', $id)")
+            .bind(("id", id.to_string()))
+            .await?;
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        // ... parse and return
     }
     
-    async fn flush(&mut self) -> Result<()> {
-        // SurrealDB handles persistence automatically
-        // For RocksDB backend, this is a no-op as writes are durable
+    // Similar implementations for documents, chunks, batch operations...
+}
+```
+
+**Key Implementation Details**:
+
+1. **Serialization Workaround**: SurrealDB's Rust SDK has limitations with complex types. We serialize to `serde_json::Value` first, then pass to SurrealDB.
+
+2. **ID Handling**: The `meta::id(id)` function extracts the string ID from SurrealDB's `Thing` type during retrieval.
+
+3. **Upsert Semantics**: All store operations use `UPSERT` for idempotent writes.
+
+4. **Transactions**: Batch operations use `BEGIN TRANSACTION` / `COMMIT TRANSACTION` for atomicity.
+
+## Testing Strategy
+
+### Unit Tests (16 tests)
+- Configuration tests: memory, rocksdb, websocket, http, builder methods
+- Error conversion tests
+- Storage CRUD operations with in-memory backend
+
+### Integration Tests (13 tests)
+Located in `graphrag-core/tests/surrealdb_storage_integration.rs`:
+
+1. **Lifecycle tests**: Entity, document, chunk full CRUD
+2. **Cross-reference integrity**: Relationships between types
+3. **Batch operations**: Transaction behavior
+4. **Concurrent access**: Interleaved read/write patterns
+5. **Special characters**: Unicode and escaping
+6. **Schema auto-init**: Automatic table creation
+7. **Isolated databases**: Namespace/database separation
+
+---
+
+## Vector Store Design
+
+### Overview
+
+The `AsyncVectorStore` trait provides vector similarity search for embeddings. SurrealDB supports native vector types and similarity functions, making it ideal for semantic search.
+
+### Trait Interface
+
+```rust
+#[async_trait]
+pub trait AsyncVectorStore: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    async fn add_vector(&mut self, id: String, vector: Vec<f32>, metadata: VectorMetadata) -> Result<()>;
+    async fn add_vectors_batch(&mut self, vectors: VectorBatch) -> Result<()>;
+    async fn search(&self, query_vector: &[f32], k: usize) -> Result<Vec<SearchResult>>;
+    async fn search_with_threshold(&self, query_vector: &[f32], k: usize, threshold: f32) -> Result<Vec<SearchResult>>;
+    async fn remove_vector(&mut self, id: &str) -> Result<bool>;
+    async fn len(&self) -> usize;
+    async fn is_empty(&self) -> bool;
+    async fn build_index(&mut self) -> Result<()>;
+}
+```
+
+### Schema Extensions
+
+```sql
+-- Vector table for embeddings with HNSW index support
+DEFINE TABLE vector SCHEMALESS;
+DEFINE FIELD id ON vector TYPE string;
+DEFINE FIELD embedding ON vector TYPE array<float>;
+DEFINE FIELD metadata ON vector FLEXIBLE TYPE object;
+DEFINE FIELD source_type ON vector TYPE string;  -- "entity", "chunk", "document"
+DEFINE FIELD source_id ON vector TYPE string;
+DEFINE FIELD created_at ON vector TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX idx_vector_id ON vector FIELDS id UNIQUE;
+DEFINE INDEX idx_vector_source ON vector FIELDS source_type, source_id;
+
+-- HNSW index for approximate nearest neighbor search
+-- Note: SurrealDB vector index syntax may vary by version
+DEFINE INDEX idx_vector_embedding ON vector FIELDS embedding 
+    MTREE DIMENSION 384 
+    TYPE F32 
+    DIST COSINE;
+```
+
+### Implementation
+
+```rust
+// graphrag-core/src/storage/surrealdb/vector.rs
+
+pub struct SurrealDbVectorStore {
+    db: Arc<Surreal<Any>>,
+    config: SurrealDbVectorConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct SurrealDbVectorConfig {
+    /// Dimension of vectors (must match embedding model)
+    pub dimension: usize,
+    /// Distance metric: "cosine", "euclidean", "manhattan"
+    pub distance_metric: DistanceMetric,
+    /// Table name for vectors (default: "vector")
+    pub table_name: String,
+    /// Whether to auto-build index after batch inserts
+    pub auto_index: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DistanceMetric {
+    Cosine,
+    Euclidean,
+    Manhattan,
+}
+
+impl DistanceMetric {
+    fn as_surql_function(&self) -> &'static str {
+        match self {
+            DistanceMetric::Cosine => "vector::similarity::cosine",
+            DistanceMetric::Euclidean => "vector::distance::euclidean",
+            DistanceMetric::Manhattan => "vector::distance::manhattan",
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncVectorStore for SurrealDbVectorStore {
+    type Error = GraphRAGError;
+
+    async fn add_vector(
+        &mut self,
+        id: String,
+        vector: Vec<f32>,
+        metadata: VectorMetadata,
+    ) -> Result<()> {
+        // Validate dimension
+        if vector.len() != self.config.dimension {
+            return Err(GraphRAGError::Validation {
+                message: format!(
+                    "Vector dimension mismatch: expected {}, got {}",
+                    self.config.dimension,
+                    vector.len()
+                ),
+            });
+        }
+
+        let record = VectorRecord {
+            id: id.clone(),
+            embedding: vector,
+            metadata,
+            source_type: None,
+            source_id: None,
+        };
+
+        let json_value = serde_json::to_value(&record)?;
+        self.db
+            .query("UPSERT type::thing($table, $id) CONTENT $data")
+            .bind(("table", &self.config.table_name))
+            .bind(("id", id))
+            .bind(("data", json_value))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn add_vectors_batch(&mut self, vectors: VectorBatch) -> Result<()> {
+        self.db.query("BEGIN TRANSACTION").await?;
+
+        for (id, vector, metadata) in vectors {
+            if let Err(e) = self.add_vector(id, vector, metadata).await {
+                self.db.query("CANCEL TRANSACTION").await.ok();
+                return Err(e);
+            }
+        }
+
+        self.db.query("COMMIT TRANSACTION").await?;
+        
+        if self.config.auto_index {
+            self.build_index().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn search(&self, query_vector: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        let distance_fn = self.config.distance_metric.as_surql_function();
+        
+        // SurrealDB vector similarity search
+        let query = format!(
+            "SELECT id, {distance_fn}(embedding, $query) AS score, metadata \
+             FROM {table} \
+             ORDER BY score DESC \
+             LIMIT $k",
+            distance_fn = distance_fn,
+            table = self.config.table_name
+        );
+
+        let mut response = self.db
+            .query(&query)
+            .bind(("query", query_vector.to_vec()))
+            .bind(("k", k))
+            .await?;
+
+        let results: Vec<VectorSearchResult> = response.take(0)?;
+        
+        Ok(results
+            .into_iter()
+            .map(|r| SearchResult {
+                id: r.id,
+                distance: 1.0 - r.score, // Convert similarity to distance
+                metadata: r.metadata,
+            })
+            .collect())
+    }
+
+    async fn search_with_threshold(
+        &self,
+        query_vector: &[f32],
+        k: usize,
+        threshold: f32,
+    ) -> Result<Vec<SearchResult>> {
+        let distance_fn = self.config.distance_metric.as_surql_function();
+        let min_score = 1.0 - threshold; // Convert distance threshold to similarity
+        
+        let query = format!(
+            "SELECT id, {distance_fn}(embedding, $query) AS score, metadata \
+             FROM {table} \
+             WHERE {distance_fn}(embedding, $query) >= $min_score \
+             ORDER BY score DESC \
+             LIMIT $k",
+            distance_fn = distance_fn,
+            table = self.config.table_name
+        );
+
+        let mut response = self.db
+            .query(&query)
+            .bind(("query", query_vector.to_vec()))
+            .bind(("k", k))
+            .bind(("min_score", min_score))
+            .await?;
+
+        let results: Vec<VectorSearchResult> = response.take(0)?;
+        
+        Ok(results
+            .into_iter()
+            .map(|r| SearchResult {
+                id: r.id,
+                distance: 1.0 - r.score,
+                metadata: r.metadata,
+            })
+            .collect())
+    }
+
+    async fn remove_vector(&mut self, id: &str) -> Result<bool> {
+        let result = self.db
+            .query("DELETE type::thing($table, $id) RETURN BEFORE")
+            .bind(("table", &self.config.table_name))
+            .bind(("id", id))
+            .await?;
+        
+        // Check if anything was deleted
+        Ok(!result.is_empty())
+    }
+
+    async fn len(&self) -> usize {
+        let query = format!("SELECT count() FROM {} GROUP ALL", self.config.table_name);
+        let mut response = self.db.query(&query).await.unwrap_or_default();
+        
+        #[derive(serde::Deserialize)]
+        struct CountResult { count: usize }
+        
+        response
+            .take::<Vec<CountResult>>(0)
+            .ok()
+            .and_then(|v| v.into_iter().next())
+            .map(|r| r.count)
+            .unwrap_or(0)
+    }
+
+    async fn build_index(&mut self) -> Result<()> {
+        // SurrealDB builds indexes automatically
+        // This method can be used to force index rebuild if needed
+        let query = format!(
+            "REBUILD INDEX idx_vector_embedding ON {}",
+            self.config.table_name
+        );
+        self.db.query(&query).await?;
         Ok(())
     }
 }
 
-// Helper struct for parsing entity ID queries
-#[derive(serde::Deserialize)]
-struct EntityIdRecord {
+// Helper types
+#[derive(Debug, Serialize, Deserialize)]
+struct VectorRecord {
     id: String,
+    embedding: Vec<f32>,
+    metadata: Option<HashMap<String, String>>,
+    source_type: Option<String>,
+    source_id: Option<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::{DocumentId, EntityId, ChunkId, ChunkMetadata};
-    
-    #[tokio::test]
-    async fn test_surrealdb_storage_memory() {
-        let config = SurrealDbConfig::memory();
-        let mut storage = SurrealDbStorage::new(config).await.unwrap();
-        
-        // Test entity storage
-        let entity = Entity {
-            id: EntityId::new("test_entity".to_string()),
-            name: "Test Entity".to_string(),
-            entity_type: "test".to_string(),
-            confidence: 0.95,
-            mentions: vec![],
-            embedding: None,
-        };
-        
-        let id = storage.store_entity(entity.clone()).await.unwrap();
-        assert_eq!(id, "test_entity");
-        
-        let retrieved = storage.retrieve_entity(&id).await.unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().name, "Test Entity");
-    }
-    
-    #[tokio::test]
-    async fn test_health_check() {
-        let config = SurrealDbConfig::memory();
-        let storage = SurrealDbStorage::new(config).await.unwrap();
-        
-        let healthy = storage.health_check().await.unwrap();
-        assert!(healthy);
-    }
+#[derive(Debug, Deserialize)]
+struct VectorSearchResult {
+    id: String,
+    score: f32,
+    metadata: Option<HashMap<String, String>>,
 }
 ```
 
-### Schema File
+### Usage Example
+
+```rust
+use graphrag_core::storage::surrealdb::{
+    SurrealDbConfig, SurrealDbVectorStore, SurrealDbVectorConfig, DistanceMetric,
+};
+
+// Create vector store with 384-dimensional embeddings (e.g., for all-MiniLM-L6-v2)
+let config = SurrealDbVectorConfig {
+    dimension: 384,
+    distance_metric: DistanceMetric::Cosine,
+    table_name: "chunk_vectors".to_string(),
+    auto_index: true,
+};
+
+let db_config = SurrealDbConfig::rocksdb("./data/vectors");
+let mut vector_store = SurrealDbVectorStore::new(db_config, config).await?;
+
+// Add vectors
+vector_store.add_vector(
+    "chunk_1".to_string(),
+    embedding_model.embed("Some text").await?,
+    Some(HashMap::from([("doc_id".to_string(), "doc_1".to_string())])),
+).await?;
+
+// Search
+let query_embedding = embedding_model.embed("search query").await?;
+let results = vector_store.search(&query_embedding, 10).await?;
+
+for result in results {
+    println!("ID: {}, Distance: {}", result.id, result.distance);
+}
+```
+
+---
+
+## Graph Store Design
+
+### Overview
+
+The `AsyncGraphStore` trait provides graph operations for the knowledge graph. SurrealDB's native graph support with `RELATE` statements and graph traversal syntax makes it ideal for relationship management.
+
+### Trait Interface
+
+```rust
+#[async_trait]
+pub trait AsyncGraphStore: Send + Sync {
+    type Node: Send + Sync;
+    type Edge: Send + Sync;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    async fn add_node(&mut self, node: Self::Node) -> Result<String>;
+    async fn add_nodes_batch(&mut self, nodes: Vec<Self::Node>) -> Result<Vec<String>>;
+    async fn add_edge(&mut self, from_id: &str, to_id: &str, edge: Self::Edge) -> Result<String>;
+    async fn add_edges_batch(&mut self, edges: Vec<(String, String, Self::Edge)>) -> Result<Vec<String>>;
+    async fn find_nodes(&self, criteria: &str) -> Result<Vec<Self::Node>>;
+    async fn get_neighbors(&self, node_id: &str) -> Result<Vec<Self::Node>>;
+    async fn traverse(&self, start_id: &str, max_depth: usize) -> Result<Vec<Self::Node>>;
+    async fn stats(&self) -> GraphStats;
+}
+```
+
+### Schema (Already Defined)
+
+The graph schema uses SurrealDB's `RELATION` table type:
 
 ```sql
--- graphrag-core/src/storage/surrealdb/schema.surql
-
--- Documents table
-DEFINE TABLE document SCHEMAFULL;
-DEFINE FIELD id ON document TYPE string;
-DEFINE FIELD title ON document TYPE string;
-DEFINE FIELD content ON document TYPE string;
-DEFINE FIELD metadata ON document FLEXIBLE TYPE object;
-DEFINE FIELD chunks ON document TYPE array<object> DEFAULT [];
-DEFINE FIELD created_at ON document TYPE datetime DEFAULT time::now();
-DEFINE INDEX idx_document_id ON document FIELDS id UNIQUE;
-
--- Entities table
-DEFINE TABLE entity SCHEMAFULL;
-DEFINE FIELD id ON entity TYPE string;
-DEFINE FIELD name ON entity TYPE string;
-DEFINE FIELD entity_type ON entity TYPE string;
-DEFINE FIELD confidence ON entity TYPE float;
-DEFINE FIELD embedding ON entity TYPE option<array<float>>;
-DEFINE FIELD mentions ON entity TYPE array<object> DEFAULT [];
-DEFINE INDEX idx_entity_id ON entity FIELDS id UNIQUE;
-DEFINE INDEX idx_entity_type ON entity FIELDS entity_type;
-DEFINE INDEX idx_entity_name ON entity FIELDS name;
-
--- Chunks table
-DEFINE TABLE chunk SCHEMAFULL;
-DEFINE FIELD id ON chunk TYPE string;
-DEFINE FIELD document_id ON chunk TYPE string;
-DEFINE FIELD content ON chunk TYPE string;
-DEFINE FIELD start_offset ON chunk TYPE int;
-DEFINE FIELD end_offset ON chunk TYPE int;
-DEFINE FIELD embedding ON chunk TYPE option<array<float>>;
-DEFINE FIELD entities ON chunk TYPE array<string> DEFAULT [];
-DEFINE FIELD metadata ON chunk TYPE object;
-DEFINE INDEX idx_chunk_id ON chunk FIELDS id UNIQUE;
-DEFINE INDEX idx_chunk_document ON chunk FIELDS document_id;
-
--- Relationships as graph edges (for future AsyncGraphStore implementation)
+-- Relationships as graph edges (already in schema.surql)
 DEFINE TABLE relates_to TYPE RELATION IN entity OUT entity;
 DEFINE FIELD relation_type ON relates_to TYPE string;
 DEFINE FIELD confidence ON relates_to TYPE float;
-DEFINE FIELD context ON relates_to TYPE array<string> DEFAULT [];
+DEFINE FIELD context ON relates_to TYPE array DEFAULT [];
 DEFINE INDEX idx_relates_type ON relates_to FIELDS relation_type;
 ```
 
-### Module Exports
+### Implementation
 
 ```rust
-// graphrag-core/src/storage/surrealdb/mod.rs
+// graphrag-core/src/storage/surrealdb/graph.rs
 
-//! SurrealDB storage backend for GraphRAG
-//!
-//! This module provides a SurrealDB implementation of the `AsyncStorage` trait,
-//! enabling persistent storage of documents, entities, and chunks.
-//!
-//! ## Features
-//!
-//! Enable with the `surrealdb-storage` feature:
-//! ```toml
-//! [dependencies]
-//! graphrag-core = { version = "0.1", features = ["surrealdb-storage"] }
-//! ```
-//!
-//! ## Usage
-//!
-//! ```rust,ignore
-//! use graphrag_core::surrealdb::{SurrealDbStorage, SurrealDbConfig};
-//!
-//! // In-memory for development
-//! let config = SurrealDbConfig::memory();
-//! let storage = SurrealDbStorage::new(config).await?;
-//!
-//! // Persistent local storage
-//! let config = SurrealDbConfig::rocksdb("./data/graphrag");
-//! let storage = SurrealDbStorage::new(config).await?;
-//! ```
+use crate::core::{Entity, Relationship};
 
-mod config;
-mod error;
-mod storage;
+pub struct SurrealDbGraphStore {
+    db: Arc<Surreal<Any>>,
+    config: SurrealDbGraphConfig,
+}
 
-pub use config::{SurrealDbConfig, SurrealDbCredentials};
-pub use error::SurrealDbStorageError;
-pub use storage::SurrealDbStorage;
+#[derive(Debug, Clone)]
+pub struct SurrealDbGraphConfig {
+    /// Node table name (default: "entity")
+    pub node_table: String,
+    /// Edge table name (default: "relates_to")
+    pub edge_table: String,
+    /// Maximum traversal depth for safety
+    pub max_traversal_depth: usize,
+}
+
+impl Default for SurrealDbGraphConfig {
+    fn default() -> Self {
+        Self {
+            node_table: "entity".to_string(),
+            edge_table: "relates_to".to_string(),
+            max_traversal_depth: 10,
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncGraphStore for SurrealDbGraphStore {
+    type Node = Entity;
+    type Edge = Relationship;
+    type Error = GraphRAGError;
+
+    async fn add_node(&mut self, node: Self::Node) -> Result<String> {
+        let id = node.id.to_string();
+        let json_value = serde_json::to_value(&node)?;
+        
+        self.db
+            .query("UPSERT type::thing($table, $id) CONTENT $data")
+            .bind(("table", &self.config.node_table))
+            .bind(("id", id.clone()))
+            .bind(("data", json_value))
+            .await?;
+        
+        Ok(id)
+    }
+
+    async fn add_edge(
+        &mut self,
+        from_id: &str,
+        to_id: &str,
+        edge: Self::Edge,
+    ) -> Result<String> {
+        // Use SurrealDB's RELATE syntax for graph edges
+        let query = format!(
+            "RELATE type::thing('{node_table}', $from_id) \
+             -> {edge_table} -> \
+             type::thing('{node_table}', $to_id) \
+             CONTENT $data",
+            node_table = self.config.node_table,
+            edge_table = self.config.edge_table
+        );
+
+        let edge_data = EdgeData {
+            relation_type: edge.relation_type.clone(),
+            confidence: edge.confidence,
+            context: edge.context.iter().map(|c| c.to_string()).collect(),
+        };
+
+        let mut response = self.db
+            .query(&query)
+            .bind(("from_id", from_id))
+            .bind(("to_id", to_id))
+            .bind(("data", serde_json::to_value(&edge_data)?))
+            .await?;
+
+        // Extract the created edge ID
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let edge_id = results
+            .first()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}->{}:{}", from_id, to_id, edge.relation_type));
+
+        Ok(edge_id)
+    }
+
+    async fn find_nodes(&self, criteria: &str) -> Result<Vec<Self::Node>> {
+        // Parse criteria as a simple field=value or use as raw SurrealQL WHERE clause
+        let query = if criteria.contains('=') || criteria.contains("WHERE") {
+            format!(
+                "SELECT *, meta::id(id) as id FROM {} WHERE {}",
+                self.config.node_table, criteria
+            )
+        } else {
+            // Treat as name search
+            format!(
+                "SELECT *, meta::id(id) as id FROM {} WHERE name CONTAINS $criteria",
+                self.config.node_table
+            )
+        };
+
+        let mut response = self.db
+            .query(&query)
+            .bind(("criteria", criteria))
+            .await?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        
+        results
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(|e| GraphRAGError::Serialization {
+                message: e.to_string(),
+            }))
+            .collect()
+    }
+
+    async fn get_neighbors(&self, node_id: &str) -> Result<Vec<Self::Node>> {
+        // Use SurrealDB graph traversal syntax
+        let query = format!(
+            "SELECT *, meta::id(id) as id FROM \
+             type::thing('{table}', $node_id)->{edge_table}->*",
+            table = self.config.node_table,
+            edge_table = self.config.edge_table
+        );
+
+        let mut response = self.db
+            .query(&query)
+            .bind(("node_id", node_id))
+            .await?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        
+        results
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(|e| GraphRAGError::Serialization {
+                message: e.to_string(),
+            }))
+            .collect()
+    }
+
+    async fn traverse(&self, start_id: &str, max_depth: usize) -> Result<Vec<Self::Node>> {
+        let depth = max_depth.min(self.config.max_traversal_depth);
+        
+        // Recursive graph traversal with depth limit
+        let query = format!(
+            "SELECT *, meta::id(id) as id FROM \
+             type::thing('{table}', $start_id)->{edge_table}->(*..{depth})",
+            table = self.config.node_table,
+            edge_table = self.config.edge_table,
+            depth = depth
+        );
+
+        let mut response = self.db
+            .query(&query)
+            .bind(("start_id", start_id))
+            .await?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        
+        results
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(|e| GraphRAGError::Serialization {
+                message: e.to_string(),
+            }))
+            .collect()
+    }
+
+    async fn stats(&self) -> GraphStats {
+        let node_count = self.count_nodes().await.unwrap_or(0);
+        let edge_count = self.count_edges().await.unwrap_or(0);
+        
+        let average_degree = if node_count > 0 {
+            (edge_count as f32 * 2.0) / node_count as f32
+        } else {
+            0.0
+        };
+
+        GraphStats {
+            node_count,
+            edge_count,
+            average_degree,
+            max_depth: self.config.max_traversal_depth,
+        }
+    }
+}
+
+impl SurrealDbGraphStore {
+    async fn count_nodes(&self) -> Result<usize> {
+        let query = format!(
+            "SELECT count() FROM {} GROUP ALL",
+            self.config.node_table
+        );
+        
+        #[derive(serde::Deserialize)]
+        struct CountResult { count: usize }
+        
+        let mut response = self.db.query(&query).await?;
+        let results: Vec<CountResult> = response.take(0)?;
+        Ok(results.first().map(|r| r.count).unwrap_or(0))
+    }
+
+    async fn count_edges(&self) -> Result<usize> {
+        let query = format!(
+            "SELECT count() FROM {} GROUP ALL",
+            self.config.edge_table
+        );
+        
+        #[derive(serde::Deserialize)]
+        struct CountResult { count: usize }
+        
+        let mut response = self.db.query(&query).await?;
+        let results: Vec<CountResult> = response.take(0)?;
+        Ok(results.first().map(|r| r.count).unwrap_or(0))
+    }
+}
+
+// Helper types
+#[derive(Debug, Serialize, Deserialize)]
+struct EdgeData {
+    relation_type: String,
+    confidence: f32,
+    context: Vec<String>,
+}
 ```
 
-## Integration with graphrag-core
-
-Update `graphrag-core/src/storage/mod.rs` to include the SurrealDB submodule:
+### Advanced Graph Queries
 
 ```rust
-// graphrag-core/src/storage/mod.rs
+impl SurrealDbGraphStore {
+    /// Find shortest path between two entities
+    pub async fn find_path(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        max_depth: usize,
+    ) -> Result<Vec<Entity>> {
+        let depth = max_depth.min(self.config.max_traversal_depth);
+        
+        // SurrealDB path finding with BFS
+        let query = format!(
+            "SELECT *, meta::id(id) as id FROM \
+             type::thing('{table}', $from_id)->{edge_table}->(*..{depth}) \
+             WHERE id = type::thing('{table}', $to_id) \
+             LIMIT 1",
+            table = self.config.node_table,
+            edge_table = self.config.edge_table,
+            depth = depth
+        );
 
-//! Storage layer for GraphRAG
-//!
-//! This module provides abstractions and implementations for storing
-//! knowledge graph data, vectors, and metadata.
+        let mut response = self.db
+            .query(&query)
+            .bind(("from_id", from_id))
+            .bind(("to_id", to_id))
+            .await?;
 
-// ... existing code ...
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        // Parse path...
+        Ok(vec![])
+    }
 
-// SurrealDB storage backend (optional)
-#[cfg(feature = "surrealdb-storage")]
-pub mod surrealdb;
+    /// Get entities by relationship type
+    pub async fn get_by_relationship(
+        &self,
+        entity_id: &str,
+        relation_type: &str,
+    ) -> Result<Vec<Entity>> {
+        let query = format!(
+            "SELECT *, meta::id(id) as id FROM \
+             type::thing('{table}', $entity_id)->{edge_table} \
+             WHERE relation_type = $relation_type \
+             ->{table}",
+            table = self.config.node_table,
+            edge_table = self.config.edge_table
+        );
 
-#[cfg(feature = "surrealdb-storage")]
-pub use surrealdb::{SurrealDbConfig, SurrealDbCredentials, SurrealDbStorage};
+        let mut response = self.db
+            .query(&query)
+            .bind(("entity_id", entity_id))
+            .bind(("relation_type", relation_type))
+            .await?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        results
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(|e| GraphRAGError::Serialization {
+                message: e.to_string(),
+            }))
+            .collect()
+    }
+
+    /// Get subgraph around an entity
+    pub async fn get_subgraph(
+        &self,
+        center_id: &str,
+        radius: usize,
+    ) -> Result<(Vec<Entity>, Vec<Relationship>)> {
+        // Get nodes in subgraph
+        let nodes = self.traverse(center_id, radius).await?;
+        
+        // Get edges between those nodes
+        let node_ids: Vec<String> = nodes.iter().map(|n| n.id.to_string()).collect();
+        
+        let edges_query = format!(
+            "SELECT * FROM {} WHERE in IN $node_ids AND out IN $node_ids",
+            self.config.edge_table
+        );
+        
+        let mut response = self.db
+            .query(&edges_query)
+            .bind(("node_ids", node_ids))
+            .await?;
+        
+        let edge_results: Vec<serde_json::Value> = response.take(0)?;
+        let edges: Vec<Relationship> = edge_results
+            .into_iter()
+            .filter_map(|v| parse_relationship(v).ok())
+            .collect();
+        
+        Ok((nodes, edges))
+    }
+}
 ```
 
-The storage module is already re-exported from `graphrag-core/src/lib.rs`, so users can access it via:
+### Usage Example
 
 ```rust
-use graphrag_core::storage::surrealdb::{SurrealDbConfig, SurrealDbStorage};
-// or via the re-export:
-use graphrag_core::storage::{SurrealDbConfig, SurrealDbStorage};
+use graphrag_core::storage::surrealdb::{
+    SurrealDbConfig, SurrealDbGraphStore, SurrealDbGraphConfig,
+};
+use graphrag_core::core::{Entity, EntityId, Relationship};
+
+let db_config = SurrealDbConfig::rocksdb("./data/graph");
+let graph_config = SurrealDbGraphConfig::default();
+let mut graph_store = SurrealDbGraphStore::new(db_config, graph_config).await?;
+
+// Add entities
+let entity1 = Entity {
+    id: EntityId::new("person_alice".to_string()),
+    name: "Alice".to_string(),
+    entity_type: "person".to_string(),
+    confidence: 0.95,
+    mentions: vec![],
+    embedding: None,
+};
+
+let entity2 = Entity {
+    id: EntityId::new("company_acme".to_string()),
+    name: "Acme Corp".to_string(),
+    entity_type: "organization".to_string(),
+    confidence: 0.90,
+    mentions: vec![],
+    embedding: None,
+};
+
+graph_store.add_node(entity1).await?;
+graph_store.add_node(entity2).await?;
+
+// Add relationship
+let relationship = Relationship {
+    source: EntityId::new("person_alice".to_string()),
+    target: EntityId::new("company_acme".to_string()),
+    relation_type: "works_for".to_string(),
+    confidence: 0.88,
+    context: vec![],
+};
+
+graph_store.add_edge("person_alice", "company_acme", relationship).await?;
+
+// Query graph
+let neighbors = graph_store.get_neighbors("person_alice").await?;
+println!("Alice's connections: {:?}", neighbors);
+
+let stats = graph_store.stats().await;
+println!("Graph has {} nodes and {} edges", stats.node_count, stats.edge_count);
 ```
+
+---
+
+## Unified Storage Interface
+
+### Combined Storage
+
+For convenience, a unified storage interface can combine all three stores:
+
+```rust
+// graphrag-core/src/storage/surrealdb/unified.rs
+
+pub struct SurrealDbUnifiedStorage {
+    storage: SurrealDbStorage,
+    vector_store: SurrealDbVectorStore,
+    graph_store: SurrealDbGraphStore,
+}
+
+impl SurrealDbUnifiedStorage {
+    pub async fn new(config: SurrealDbConfig) -> Result<Self> {
+        let db = surrealdb::engine::any::connect(&config.endpoint).await?;
+        db.use_ns(&config.namespace).use_db(&config.database).await?;
+        
+        let db = Arc::new(db);
+        
+        // Share the connection across all stores
+        Ok(Self {
+            storage: SurrealDbStorage::from_client(Arc::clone(&db), config.clone())?,
+            vector_store: SurrealDbVectorStore::from_client(
+                Arc::clone(&db),
+                SurrealDbVectorConfig::default(),
+            )?,
+            graph_store: SurrealDbGraphStore::from_client(
+                Arc::clone(&db),
+                SurrealDbGraphConfig::default(),
+            )?,
+        })
+    }
+    
+    pub fn storage(&mut self) -> &mut SurrealDbStorage { &mut self.storage }
+    pub fn vectors(&mut self) -> &mut SurrealDbVectorStore { &mut self.vector_store }
+    pub fn graph(&mut self) -> &mut SurrealDbGraphStore { &mut self.graph_store }
+}
+```
+
+---
 
 ## Configuration via TOML
-
-Example configuration file support:
 
 ```toml
 [storage]
@@ -652,55 +1048,20 @@ auto_init_schema = true
 [storage.surrealdb.credentials]
 username = "root"
 password = "secret"
+
+[storage.surrealdb.vector]
+dimension = 384
+distance_metric = "cosine"
+table_name = "embeddings"
+auto_index = true
+
+[storage.surrealdb.graph]
+node_table = "entity"
+edge_table = "relates_to"
+max_traversal_depth = 10
 ```
 
-## Testing Strategy
-
-1. **Unit Tests**: Test individual CRUD operations with in-memory backend
-2. **Integration Tests**: Test with RocksDB backend for persistence verification
-3. **Feature Gate Tests**: Ensure code compiles with/without `surrealdb-storage` feature
-
-```rust
-#[cfg(test)]
-#[cfg(feature = "surrealdb-storage")]
-mod integration_tests {
-    use super::*;
-    use tempfile::TempDir;
-    
-    #[tokio::test]
-    async fn test_persistent_storage() {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().to_str().unwrap();
-        
-        // Store data
-        {
-            let config = SurrealDbConfig::rocksdb(path);
-            let mut storage = SurrealDbStorage::new(config).await.unwrap();
-            
-            let entity = Entity { /* ... */ };
-            storage.store_entity(entity).await.unwrap();
-        }
-        
-        // Verify persistence after reconnect
-        {
-            let config = SurrealDbConfig::rocksdb(path);
-            let storage = SurrealDbStorage::new(config).await.unwrap();
-            
-            let retrieved = storage.retrieve_entity("test_entity").await.unwrap();
-            assert!(retrieved.is_some());
-        }
-    }
-}
-```
-
-## Future Extensions
-
-This design provides a foundation for additional SurrealDB integrations:
-
-1. **AsyncVectorStore**: Leverage SurrealDB's native vector type and `vector::similarity::cosine()` for semantic search
-2. **AsyncGraphStore**: Use `RELATE` statements and graph traversal for the knowledge graph
-3. **Live Queries**: Subscribe to real-time updates for incremental graph processing
-4. **Full-Text Search**: Use SurrealDB's built-in search capabilities
+---
 
 ## Dependencies Summary
 
@@ -717,7 +1078,14 @@ surrealdb = { version = "2.3", optional = true, default-features = false, featur
 
 ## Compatibility Notes
 
-- **SurrealDB Version**: 2.0.0 to 2.3.x
+- **SurrealDB Version**: 2.0.0 to 2.3.x (tested with 2.3)
 - **Rust MSRV**: 1.80.1+ (matches SurrealDB SDK requirement)
 - **Async Runtime**: Tokio (already required by graphrag-core with `async` feature)
 - **Feature Interaction**: Requires `async` feature (SurrealDB SDK is async-only)
+
+## Migration Path
+
+1. **Phase 1** (Complete): AsyncStorage implementation
+2. **Phase 2** (Planned): AsyncVectorStore implementation
+3. **Phase 3** (Planned): AsyncGraphStore implementation
+4. **Phase 4** (Future): Live queries for real-time updates, full-text search integration
