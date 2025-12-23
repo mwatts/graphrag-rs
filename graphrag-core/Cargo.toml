@@ -22,6 +22,7 @@ ureq = ["dep:ureq"]
 memory-storage = []
 persistent-storage = ["arrow", "parquet"]  # Apache Parquet persistence
 # lance-storage = ["lancedb"]  # LanceDB vector storage (disabled due to version conflict)
+surrealdb-storage = ["surrealdb", "async"]  # SurrealDB multi-model storage
 
 # Retrieval methods
 basic-retrieval = []
@@ -212,6 +213,9 @@ hf-hub = { version = "0.3", optional = true, default-features = false, features 
 # Code parsing for structured chunking
 tree-sitter = { version = "0.22", optional = true }
 tree-sitter-rust = { version = "0.21", optional = true }
+
+# SurrealDB multi-model database (optional, for surrealdb-storage feature)
+surrealdb = { version = "2.3", optional = true, default-features = false, features = ["kv-mem", "kv-rocksdb"] }
 
 # WASM-specific dependencies
 serde-wasm-bindgen = { version = "0.6", optional = true }

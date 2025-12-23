@@ -2,10 +2,24 @@
 //!
 //! This module provides abstractions and implementations for storing
 //! knowledge graph data, vectors, and metadata.
+//!
+//! ## Available Backends
+//!
+//! - [`MemoryStorage`]: In-memory storage for development and testing
+//! - [`surrealdb::SurrealDbStorage`]: SurrealDB multi-model database (requires `surrealdb-storage` feature)
 
-use crate::core::{Document, Entity, Result, TextChunk};
+// SurrealDB storage backend (optional)
+#[cfg(feature = "surrealdb-storage")]
+pub mod surrealdb;
+
+#[cfg(feature = "surrealdb-storage")]
+pub use surrealdb::{
+    SurrealDbConfig, SurrealDbCredentials, SurrealDbStorage, SurrealDbStorageError,
+};
+
 #[cfg(feature = "async")]
 use crate::core::{traits::Storage, GraphRAGError};
+use crate::core::{Document, Entity, Result, TextChunk};
 use std::collections::HashMap;
 
 /// In-memory storage implementation for development and testing
