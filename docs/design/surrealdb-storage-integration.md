@@ -1035,30 +1035,197 @@ impl SurrealDbUnifiedStorage {
 
 ## Configuration via TOML
 
-```toml
-[storage]
-backend = "surrealdb"
+The SurrealDB storage configuration integrates with the existing graphrag-rs configuration system, following the same patterns used by other top-level sections like `[embeddings]`, `[ollama]`, and `[graph]`.
 
-[storage.surrealdb]
+### Basic Configuration
+
+```toml
+# =============================================================================
+# GraphRAG Configuration with SurrealDB Storage
+# =============================================================================
+
+[general]
+input_document_path = "path/to/your/document.txt"
+output_dir = "./output"
+log_level = "info"
+
+# -----------------------------------------------------------------------------
+# SurrealDB Storage Backend
+# -----------------------------------------------------------------------------
+[surrealdb]
+# Enable SurrealDB storage backend
+enabled = true
+
+# Connection endpoint:
+# - "mem://" for in-memory (development/testing)
+# - "rocksdb://./data/graphrag" for persistent local storage
+# - "ws://localhost:8000" for remote WebSocket connection
+# - "http://localhost:8000" for remote HTTP connection
 endpoint = "rocksdb://./data/graphrag"
+
+# Namespace for data isolation (multi-tenant support)
 namespace = "graphrag"
-database = "production"
+
+# Database name within namespace
+database = "default"
+
+# Whether to initialize schema on connect
 auto_init_schema = true
 
-[storage.surrealdb.credentials]
+# Optional authentication (required for remote connections)
+[surrealdb.credentials]
 username = "root"
 password = "secret"
 
-[storage.surrealdb.vector]
+# -----------------------------------------------------------------------------
+# Vector Store Configuration (Phase 2)
+# -----------------------------------------------------------------------------
+[surrealdb.vector]
+# Dimension of vectors (must match embedding model)
+# - 384 for all-MiniLM-L6-v2
+# - 1024 for voyage-3-large, bge-large-en-v1.5
+# - 1536 for text-embedding-3-small
 dimension = 384
+
+# Distance metric: "cosine", "euclidean", "manhattan"
 distance_metric = "cosine"
+
+# Table name for vector storage
 table_name = "embeddings"
+
+# Auto-build index after batch inserts
 auto_index = true
 
-[storage.surrealdb.graph]
+# -----------------------------------------------------------------------------
+# Graph Store Configuration (Phase 3)
+# -----------------------------------------------------------------------------
+[surrealdb.graph]
+# Table name for graph nodes (entities)
 node_table = "entity"
+
+# Table name for graph edges (relationships)
 edge_table = "relates_to"
+
+# Maximum traversal depth for safety
 max_traversal_depth = 10
+
+# -----------------------------------------------------------------------------
+# Embeddings Configuration (existing graphrag-rs pattern)
+# -----------------------------------------------------------------------------
+[embeddings]
+# Provider: "huggingface", "openai", "voyage", "ollama", etc.
+provider = "huggingface"
+model = "sentence-transformers/all-MiniLM-L6-v2"
+batch_size = 32
+
+# -----------------------------------------------------------------------------
+# Ollama Configuration (existing graphrag-rs pattern)
+# -----------------------------------------------------------------------------
+[ollama]
+enabled = true
+host = "http://localhost"
+port = 11434
+chat_model = "llama3.1:8b"
+embedding_model = "nomic-embed-text"
+timeout_seconds = 60
+
+# -----------------------------------------------------------------------------
+# Graph Construction (existing graphrag-rs pattern)
+# -----------------------------------------------------------------------------
+[graph]
+max_connections = 15
+similarity_threshold = 0.5
+extract_relationships = true
+relationship_confidence_threshold = 0.5
+```
+
+### Environment-Specific Configurations
+
+#### Development (In-Memory)
+
+```toml
+[surrealdb]
+enabled = true
+endpoint = "mem://"
+namespace = "graphrag"
+database = "dev"
+auto_init_schema = true
+# No credentials needed for in-memory
+```
+
+#### Production (Persistent Local)
+
+```toml
+[surrealdb]
+enabled = true
+endpoint = "rocksdb://./data/graphrag-prod"
+namespace = "graphrag"
+database = "production"
+auto_init_schema = false  # Schema managed externally
+
+[surrealdb.credentials]
+username = "admin"
+password = "${SURREALDB_PASSWORD}"  # Environment variable substitution
+```
+
+#### Distributed (Remote Server)
+
+```toml
+[surrealdb]
+enabled = true
+endpoint = "ws://surrealdb.example.com:8000"
+namespace = "graphrag"
+database = "distributed"
+auto_init_schema = false
+
+[surrealdb.credentials]
+username = "app_user"
+password = "${SURREALDB_PASSWORD}"
+```
+
+### Rust Configuration Loading
+
+The configuration integrates with the existing `SetConfig` system:
+
+```rust
+use graphrag_core::config::SetConfig;
+use graphrag_core::storage::surrealdb::{SurrealDbConfig, SurrealDbStorage};
+
+// Load from TOML file (uses existing graphrag-rs loader)
+let set_config: SetConfig = toml::from_str(&config_content)?;
+
+// Extract SurrealDB config section
+let surrealdb_config = SurrealDbConfig {
+    endpoint: set_config.surrealdb.endpoint,
+    namespace: set_config.surrealdb.namespace,
+    database: set_config.surrealdb.database,
+    credentials: set_config.surrealdb.credentials.map(|c| SurrealDbCredentials {
+        username: c.username,
+        password: c.password,
+    }),
+    auto_init_schema: set_config.surrealdb.auto_init_schema,
+};
+
+// Create storage instance
+let storage = SurrealDbStorage::new(surrealdb_config).await?;
+```
+
+### Programmatic Configuration
+
+```rust
+use graphrag_core::storage::surrealdb::SurrealDbConfig;
+
+// Builder pattern (matching existing graphrag-rs style)
+let config = SurrealDbConfig::rocksdb("./data/graphrag")
+    .with_namespace("myapp")
+    .with_database("production")
+    .with_credentials("admin", "secret")
+    .without_auto_schema();
+
+// Or use factory methods
+let dev_config = SurrealDbConfig::memory();
+let ws_config = SurrealDbConfig::websocket("localhost", 8000);
+let http_config = SurrealDbConfig::http("surrealdb.example.com", 8000);
 ```
 
 ---
